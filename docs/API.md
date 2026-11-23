@@ -59,12 +59,13 @@ Executes sequentially on the camera main thread in a single HTTP round-trip. **C
 | `"static:Settings"` | `com.sony.scalar.sysutil.didep.Settings` | `getTargetMediaId`, `getUsingMedia`, `isLiveAndRec`. |
 | `"static:Temperature"` | `com.sony.scalar.sysutil.didep.Temperature` | `getStatus` — instantiates, reads `Temperature.Status` public fields, and releases safely. |
 | `"static:System"` | Android System / `BatteryManager` | `getBattery` — returns `{ level, scale, percent, status, plugged }`. |
-| `"highlevel"` | `CameraGoalController` | Device-side event-driven closed-loop setters (`setFocusPosition`, `setAperture`, `setShutterSpeed`, `setZoomPosition`). Runs on HTTP worker thread without blocking camera UI. |
+| `"highlevel"` | `CameraGoalController` | Device-side event-driven closed-loop setters (`setFocusPosition`, `setAperture`, `setShutterSpeed`, `setZoomPosition`) and the relative `shiftFocus`. Runs on HTTP worker thread without blocking camera UI. |
 
 ### High-Level Closed-Loop APIs (`target: "highlevel"`)
 Sony `CameraEx` does not expose absolute setters for focus, aperture, shutter speed, or optical zoom — only relative stepping methods. `CameraGoalController` drives these in a tight local closed loop using hardware listener callbacks:
 
-* **`setFocusPosition(targetPos[, tolerance])`**: Drives MF position using `startOneShotFocusDrive` until within `tolerance` (default `2`).
+* **`setFocusPosition(targetPos[, tolerance])`**: Drives MF position using `startOneShotFocusDrive` until within `tolerance` (default `2`). Needs focus drive support; the `ILCE-7` has none (`getMaxFocusDriveSpeed()` is `0`) and fails with `Focus position unavailable`.
+* **`shiftFocus(steps)`**: Moves focus by a relative number of steps with `CameraEx.shiftFocusPosition`, split into calls of at most `getMaxFocusShift()` steps (16 on the `ILCE-7`). Works on bodies without focus drive but reports no position. Returns `{ requested, applied, accepted, calls, maxStepsPerCall }`; `accepted: false` means the camera refused a call and the rest was not applied.
 * **`setAperture(fValue100)`**: Steps `incrementAperture` / `decrementAperture` until reaching `fValue100` (e.g., `800` for `F8.0`, clamped to `currentAvailableMin`..`currentAvailableMax`).
 * **`setShutterSpeed(numerator, denominator)`**: Steps `incrementShutterSpeed` / `decrementShutterSpeed` until reaching `numerator / denominator` seconds (e.g., `[1, 125]` for `1/125s`).
 * **`setZoomPosition(opticalPosition[, tolerance])`**: Steps `startZoom` / `stopZoom` until reaching `opticalPosition` (default tolerance `1`).
@@ -97,7 +98,7 @@ Sony `CameraEx` does not expose absolute setters for focus, aperture, shutter sp
 
 ### Security Blacklist
 To prevent destabilizing the camera session or overwriting event hooks, the following are blocked:
-* `open`, `reopen`, `release`, `getNormalCamera`, `create*`, `withSupportedParameters`, `tryIgnoreInhibit`, `shiftFocusPosition` (blocks/hangs on `ILCE-6000` main thread)
+* `open`, `reopen`, `release`, `getNormalCamera`, `create*`, `withSupportedParameters`, `tryIgnoreInhibit`, `shiftFocusPosition` (blocks/hangs on `ILCE-6000` main thread; use `highlevel.shiftFocus` instead)
 * All `set*Listener`, `set*Callback`, and methods taking interface/callback arguments (callbacks are handled centrally and streamed via `/api/events`).
 
 > **Caution (Preview Pipeline Rebuild):** Setting structural parameters such as `setImageSize`, `setImageAspectRatio`, `setRawRecMode`, `setPictureStorageFormat`, or `setDriveMode` may cause the camera firmware to rebuild its preview pipeline, briefly interrupting LiveView.
@@ -181,17 +182,3 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * **`GET /api/photos/latest`**: Downloads the latest captured JPEG (from in-memory capture buffer or SD card).
 * **`GET /api/photos/download?path=<absolutePath>`**: Streams a specific SD card file (JPG or ARW).
 * **`GET /api/log`**: Returns plain-text crash/debug logs from the camera.
-
----
-
-## 5. Host Companion Backend Endpoints (`/local-api/*`)
-
-When `web-client` is served through `host-server/server.py` (or `vite dev` proxying `/local-api` to `VITE_BACKEND_URL`), the following host-side endpoints are available:
-
-* **`GET /local-api/capabilities`**: Returns backend availability and OpenFocus CLI detection status (`{ backend, cameraUrl, openfocus: { available, reason } }`).
-* **`POST /local-api/stacks`**: Body `{ sessionId, cameraUrl? }`. Creates a temporary focus-stack collection directory.
-* **`POST /local-api/stacks/{sessionId}/grab-latest`**: Fetches `/api/photos/latest` from the camera and stores it sequentially (`001.jpg`, `002.jpg`, ...) in the session's input folder.
-* **`POST /local-api/stacks/{sessionId}/merge`**: Asynchronously launches OpenFocus CLI (`--method dtcwt --align ecc`) to produce `output.jpg`.
-* **`GET /local-api/stacks/{sessionId}`**: Returns `{ sessionId, status, frameCount, error }` (`status`: `collecting` | `merging` | `done` | `error`).
-* **`GET /local-api/stacks/{sessionId}/result`**: Streams the merged JPEG (`image/jpeg`).
-* **`DELETE /local-api/stacks/{sessionId}`**: Deletes the temporary session directory.

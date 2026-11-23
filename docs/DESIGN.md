@@ -53,8 +53,8 @@ Internally, PlayMemories-capable Sony cameras run an embedded **Android 2.3.3 (A
 +-----------------------------------------------------------------------+
 |                  Web Client (web-client/, React + TS)                 |
 |  - CameraClient SDK (src/api/cameraClient.ts)                         |
-|  - LiveViewPanel (MJPEG/JPG, Peaking, Histogram, 5.9x/11.7x Loupe) |
-|  - FocusControl (Device-side closed-loop gotoFocus & focus stacking)  |
+|  - LiveViewPanel (MJPEG/JPG, Peaking, Histogram, full screen)       |
+|  - FocusControl (relative focus knob via highlevel.shiftFocus)       |
 |  - ExposureControl, PhotoBrowser, AutoSavePanel, RpcInspector         |
 +-----------------------------------------------------------------------+
 ```
@@ -69,18 +69,17 @@ Internally, PlayMemories-capable Sony cameras run an embedded **Android 2.3.3 (A
 * Because `CameraEx` does not expose absolute setters for focus (`shiftFocusPosition()` hangs on `ILCE-6000`), aperture, shutter speed, or optical zoom, `CameraGoalController.java` implements event-driven closed-loop positioning on the camera under `target: "highlevel"`:
   * **Zero UI Blocking**: Waiting for hardware listener callbacks (`FocusDrive`, `ApertureChange`, `ShutterSpeedChange`, `ZoomChange`) runs on the calling HTTP worker thread, while each single drive step is dispatched briefly to the main thread via `runOnMainSync`.
   * **Per-Parameter Isolation & Latest-Wins Preemption**: Focus, aperture, shutter, and zoom run in independent `GoalSlot`s so different parameters execute in parallel, while a newer target for the same parameter increments `generationId` and immediately supersedes any in-flight request (`superseded: true`).
-* `CameraClient.runFocusStack()` interpolates `N` targets between `Start A` and `End B`, calls `gotoFocus()` (`highlevel.setFocusPosition`), waits `settleMs`, triggers `burstableTakePicture()`, and supports instant cancellation via `AbortController`.
+* **Bodies without focus drive (`ILCE-7`)**: `setFocusPosition` depends on `FocusDrive` events, which the `ILCE-7` never sends (`getMaxFocusDriveSpeed()` is `0`). `highlevel.shiftFocus(steps)` instead calls `shiftFocusPosition()` in chunks of at most `getMaxFocusShift()` steps under the focus lock; it is open loop, with no position feedback. `FocusControl.tsx` drives it from a knob and keeps at most one request in flight, merging detents turned meanwhile into the next request.
 
 ### 4.3 LiveView Stream Management, Canvas Processing & Auto-Save
 * `LiveViewManager` maintains up to `MAX_MJPEG_CLIENTS = 3` concurrent MJPEG clients in an `ArrayList<MjpegClient>` keyed by client-generated `cid` (per-tab `sessionStorage` ID). Reconnecting with the same `cid` replaces that tab's previous stream immediately; exceeding 3 distinct clients evicts the oldest (`index 0`).
 * `LiveViewPanel.tsx` automatically pauses LiveView on `visibilitychange` (`hidden`) and notifies `POST /api/liveview/close?cid=...` via `navigator.sendBeacon` (or `fetch(..., { keepalive: true })`) on pause, tab switch, or `pagehide`, waking `waitForNextFrame()` immediately.
-* `LiveViewPanel.tsx` reads the `/api/liveview.mjpeg` byte stream via `fetch()` + `ReadableStream` (or `/api/liveview.jpg` in debug polling mode), decoding only the newest frame (zero backlog) onto `<canvas>` with optional real-time client-side **Focus Peaking**, **Luma Histogram**, **Rule-of-Thirds Grid**, and a **5.9x / 11.7x Click-to-Magnify Focus Loupe**.
-* `App.tsx` listens for `Jpeg` events on `/api/events` (from `PictureCallback.onPictureTaken` via `/api/photos/latest`) and generates local-time filenames: `capture_YYYYMMDD_HHMMSS.jpg` for single shots, and `capture_YYYYMMDD_HHMMSS_001.jpg`, `_002.jpg`, ... for focus stacks. Photos are saved to the **browser machine's local filesystem** via the File System Access API (`showDirectoryPicker`) or standard browser downloads. Due to browser permission restrictions without a host backend, Auto-Save is gated by `/local-api/capabilities` (`backend === true`) and greyed out with an `i` tooltip when unavailable.
+* `LiveViewPanel.tsx` reads the `/api/liveview.mjpeg` byte stream via `fetch()` + `ReadableStream` (or `/api/liveview.jpg` in debug polling mode), decoding only the newest frame (zero backlog) onto `<canvas>` with optional real-time client-side **Focus Peaking**, **Luma Histogram**, **Rule-of-Thirds Grid**, click-to-AF, and a full-screen mode (Fullscreen API on the stage element).
+* `App.tsx` listens for `Jpeg` events on `/api/events` (from `PictureCallback.onPictureTaken` via `/api/photos/latest`) and generates local-time filenames: `capture_YYYYMMDD_HHMMSS.jpg`, or `<base>_0001.jpg`, `_0002.jpg`, ... while a capture series is active. Photos are saved to the **browser machine's local filesystem** via the File System Access API (`showDirectoryPicker`) or standard browser downloads.
 
-### 4.4 Host Companion Backend & OpenFocus Integration (`host-server/`)
-* Because the camera runs Android 2.3 with tight CPU/RAM limits, multi-focus alignment and fusion run off-camera in an optional zero-dependency Python 3 companion server (`host-server/server.py`).
-* **Namespace Isolation**: Host-only endpoints live under `/local-api/*`, while `/api/*` is transparently streamed/proxied to the camera (including chunked MJPEG and SSE streams). When `web-client` is opened directly against the camera without the host backend, `GET /local-api/capabilities` fails/404s gracefully and the UI disables/greys out both **Auto-Save** and **Auto Merge (OpenFocus)** with explanatory `i` tooltips.
-* **Single-Output Auto-Merge Pipeline**: When `Auto Merge (OpenFocus)` is enabled during a focus stack, `App.tsx` intercepts `Jpeg` events and instructs the backend (`POST /local-api/stacks/{id}/grab-latest`) to collect each frame into a temporary session folder instead of saving individual frames to Auto-Save. Once the stack completes, `POST /local-api/stacks/{id}/merge` spawns OpenFocus CLI asynchronously (`--method dtcwt --align ecc`, `.jpg` output). After polling `GET /local-api/stacks/{id}` to `done`, only the single merged `capture_YYYYMMDD_HHMMSS.jpg` is downloaded and saved to the browser machine's local folder via `queueSavePhoto`.
+### 4.4 Host Companion Server (`host-server/`)
+* An optional zero-dependency Python 3 server (`host-server/server.py`) serves `web-client/dist/index.html` over HTTPS with a self-signed certificate and streams `/api/*` to the camera (including chunked MJPEG and SSE). The secure context lets browsers use `showDirectoryPicker`, so Auto-Save can write into a chosen local folder over the LAN.
+* This fork removed upstream's `/local-api/*` endpoints and the OpenFocus focus-stack merging they served.
 
 ## 5. Related Documentation
 * [USER_GUIDE.md](./USER_GUIDE.md) — Hardware compatibility, flashing instructions, and UI walkthrough

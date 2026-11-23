@@ -32,7 +32,7 @@ Project: **Sony PMCA WebControl** — Android 2.3 (API 10) in-camera HTTP/RPC br
 * **Run or syntax-check host companion server (`host-server/`)**:
   ```bash
   python3 -m py_compile host-server/server.py
-  python3 host-server/server.py --camera http://192.168.0.250:8080 --openfocus-dir /path/to/OpenFocus
+  python3 host-server/server.py --camera http://192.168.0.250:8080
   ```
 
 ## Key Documentation
@@ -40,3 +40,10 @@ Project: **Sony PMCA WebControl** — Android 2.3 (API 10) in-camera HTTP/RPC br
 * [docs/API.md](./docs/API.md) — HTTP/RPC endpoints, `highlevel` targets, `/api/events`, and `/api/liveview*`
 * [docs/USER_GUIDE.md](./docs/USER_GUIDE.md) — Camera compatibility, flashing, and user operation
 * [docs/DEVELOPER_GUIDE.md](./docs/DEVELOPER_GUIDE.md) — Build setup, testing loop, and extension points
+
+## Fork Notes (WebControl A7)
+
+* **Build without a local toolchain**: `scripts/build.sh` (Docker, pinned JDK 8 / Android 10 / build-tools 25.0.2 / Node 22). Debug builds are signed with the committed `camera-app/debug.keystore`.
+* **Application id** is `io.github.pikachuface.webcontrol` (label *WebControl A7*); Java packages stay `com.sony.pmca.webcontrol`. Installing a build signed with another key over an existing install fails with PMCA `Communication error 100`.
+* **ILCE-7 focus**: no focus drive (`getMaxFocusDriveSpeed()` is `0`, no `FocusDrive` events), so `highlevel.setFocusPosition` cannot work there. Use `highlevel.shiftFocus(steps)` (relative, no position feedback).
+* Focus stacking, OpenFocus and `/local-api/*` were removed; do not reintroduce them without a focus-position source.
