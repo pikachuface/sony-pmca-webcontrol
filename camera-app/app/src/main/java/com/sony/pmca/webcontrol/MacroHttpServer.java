@@ -221,6 +221,22 @@ public class MacroHttpServer extends NanoHTTPD {
                 return jsonOk(cropper.toJson().toString());
             }
 
+            if ("/api/timelapse".equals(uri)) {
+                TimelapseController tl = m_activity.getTimelapse();
+                if (Method.POST.equals(method)) {
+                    JSONObject body = parseJsonBody(session);
+                    String action = body.optString("action", "");
+                    if ("start".equals(action)) {
+                        return jsonOk(tl.start(body.getInt("frames"), body.getLong("intervalMs")).toString());
+                    }
+                    if ("stop".equals(action)) {
+                        return jsonOk(tl.stop().toString());
+                    }
+                    return jsonError(Response.Status.BAD_REQUEST, "action must be start or stop");
+                }
+                return jsonOk(tl.toJson().toString());
+            }
+
             if ("/api/liveview/close".equals(uri)) {
                 String cid = params.get("cid");
                 boolean closed = m_activity.getLiveViewManager().closeMjpegClient(cid);
@@ -241,10 +257,18 @@ public class MacroHttpServer extends NanoHTTPD {
 
             if ("/api/photos/latest".equals(uri)) {
                 boolean inline = "1".equals(params.get("inline"));
-                byte[] inMem = m_activity.getLiveViewManager().getLastCapturedJpeg();
-                if (inMem != null && inMem.length > 0) {
-                    Response res = new Response(Response.Status.OK, "image/jpeg", new ByteArrayInputStream(inMem));
+                LiveViewManager.CapturedPicture last = m_activity.getLiveViewManager().getLastCapture();
+                // ?index=N asks for one specific capture (from the Jpeg event's captureIndex). Only
+                // the newest JPEG is kept, so an older one is gone once the next shot arrives.
+                String wantIndex = params.get("index");
+                if (wantIndex != null && (last == null || !wantIndex.equals(String.valueOf(last.index)))) {
+                    return jsonError(Response.Status.NOT_FOUND, "Capture " + wantIndex
+                            + " was replaced by a newer one (latest is " + (last != null ? last.index : 0) + ")");
+                }
+                if (last != null && last.jpeg.length > 0) {
+                    Response res = new Response(Response.Status.OK, "image/jpeg", new ByteArrayInputStream(last.jpeg));
                     res.addHeader("Content-Disposition", (inline ? "inline" : "attachment") + "; filename=\"latest_capture.jpg\"");
+                    res.addHeader("X-Capture-Index", String.valueOf(last.index));
                     return addCors(res);
                 }
                 File latest = PhotoStorageHelper.getLatestPhotoFile();
@@ -635,6 +659,7 @@ public class MacroHttpServer extends NanoHTTPD {
         res.addHeader("Access-Control-Allow-Origin", "*");
         res.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         res.addHeader("Access-Control-Allow-Headers", "Content-Type");
+        res.addHeader("Access-Control-Expose-Headers", "X-Capture-Index");
         return res;
     }
 

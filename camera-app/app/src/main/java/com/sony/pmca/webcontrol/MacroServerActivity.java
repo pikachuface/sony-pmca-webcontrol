@@ -94,6 +94,11 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
     }
 
     private final OutputCropper m_outputCropper = new OutputCropper();
+    private final TimelapseController m_timelapse = new TimelapseController(this);
+
+    public TimelapseController getTimelapse() {
+        return m_timelapse;
+    }
 
     public OutputCropper getOutputCropper() {
         return m_outputCropper;
@@ -201,6 +206,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
                 @Override
                 public void onEnd(int reason, int arg1, CameraEx cameraEx) {
                     m_eventHub.setState("capturing", false);
+                    m_timelapse.onCaptureEnd();
                     JSONObject data = new JSONObject();
                     try {
                         data.put("capturing", false);
@@ -217,10 +223,11 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             @Override
             public void onPictureTaken(byte[] data, CameraEx cameraEx) {
                 if (data != null) {
-                    m_liveViewManager.onPictureJpeg(data);
+                    long index = m_liveViewManager.onPictureJpeg(data);
                     JSONObject ev = new JSONObject();
                     try {
                         ev.put("size", data.length);
+                        ev.put("captureIndex", index);
                     } catch (Throwable ignored) {
                     }
                     m_eventHub.emit("Jpeg", ev);
@@ -246,6 +253,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
                     }
                     m_eventHub.setState("lastStoreImage", data);
                     m_eventHub.emit("StoreImageComplete", data);
+                    m_timelapse.onStoreImageComplete();
                 }
             });
         } catch (Throwable ignored) {
@@ -528,6 +536,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
     @Override
     protected void onPause() {
         super.onPause();
+        m_timelapse.stop();
         com.github.ma1co.pmcademo.app.Logger.flush();
 
         if (m_httpServer != null) {

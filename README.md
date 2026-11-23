@@ -17,6 +17,15 @@ controlled from any browser on the LAN.
   **[−] knob [+]** with end stops at ±16: click the live view to AF, then turn the knob with the
   scroll wheel, a vertical drag or the arrow keys. Each detent moves the offset by **Step size**
   (default 4), or by 1 while **Shift** is held; **Back to AF** returns to offset 0.
+* **Timelapse** that runs on the camera: enter the shooting time, video fps and video length, and the
+  panel shows the number of frames, the interval, the end time and the size on the card. The camera
+  shoots on schedule and stores to the SD card even with the browser closed; the open tab can also
+  save each frame's JPEG to the PC, with a warning when Wi-Fi (measured 2.3 MB/s on the ILCE-7) cannot
+  keep up with the interval.
+* **Output crop**: ✂ Crop draws a rectangle with four side handles over the live view;
+  `/api/output.mjpeg` then streams only that region (for OBS or ffmpeg) while the web view still
+  shows the whole frame. ▣ Frame zooms the view to the crop. The rule-of-thirds grid follows the crop.
+* **Preview zoom**: a vertical slider beside the live view zooms the browser view 1-4x; drag to pan.
 * **Focus stacking and OpenFocus auto-merge removed**, along with the host server's `/local-api/*`.
 * **Magnify tool removed** from the live view; a **full screen** button was added.
 * **Reproducible build in Docker** (`scripts/build.sh`), with a committed debug key so APKs from any
@@ -24,8 +33,7 @@ controlled from any browser on the LAN.
 * **Own application id** (`io.github.pikachuface.webcontrol`, shown as *WebControl A7*), so it installs
   next to upstream's app instead of conflicting with it.
 
-Planned: timelapse (shooting duration + FPS + video length → interval), video recording, AF area /
-face detection controls.
+Planned: video recording, AF area / face detection controls.
 
 ## Camera support
 

@@ -43,6 +43,7 @@ public class LiveViewManager {
     private ByteBuffer m_liveviewByteBuf;
     private byte[] m_latestJpeg;
     private byte[] m_lastCapturedJpeg;
+    private volatile long m_lastCapturedIndex;
     private long m_lastLiveviewFetchMs = 0;
     private long m_lastFetchDurationMs = 0;
     private long m_frameSeq = 0;
@@ -222,21 +223,41 @@ public class LiveViewManager {
         }
     }
 
-    public void onPictureJpeg(byte[] data) {
+    /** Stores a captured picture's JPEG; returns its capture index (1, 2, ... since app start). */
+    public long onPictureJpeg(byte[] data) {
         if (data == null) {
-            return;
+            return m_lastCapturedIndex;
         }
         synchronized (m_frameLock) {
             m_latestJpeg = data;
             m_lastCapturedJpeg = data;
+            m_lastCapturedIndex++;
             m_frameSeq++;
             m_frameLock.notifyAll();
+            return m_lastCapturedIndex;
         }
     }
 
     public byte[] getLastCapturedJpeg() {
         synchronized (m_frameLock) {
             return m_lastCapturedJpeg;
+        }
+    }
+
+    /** The last captured JPEG with its capture index, read together; null before any capture. */
+    public CapturedPicture getLastCapture() {
+        synchronized (m_frameLock) {
+            return m_lastCapturedJpeg != null ? new CapturedPicture(m_lastCapturedIndex, m_lastCapturedJpeg) : null;
+        }
+    }
+
+    public static final class CapturedPicture {
+        public final long index;
+        public final byte[] jpeg;
+
+        CapturedPicture(long index, byte[] jpeg) {
+            this.index = index;
+            this.jpeg = jpeg;
         }
     }
 

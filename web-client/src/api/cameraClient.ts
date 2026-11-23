@@ -56,6 +56,7 @@ export interface CameraState {
   lastShutterStatus?: number;
   capturing?: boolean;
   focusShift?: FocusShiftState;
+  timelapse?: TimelapseState;
   lens?: {
     LensName?: string;
     LensType?: string;
@@ -143,6 +144,23 @@ export interface FocusShiftState {
   offset: number;
   min: number;
   max: number;
+}
+
+/** Camera-side timelapse scheduler (`/api/timelapse`). Times are camera epoch milliseconds. */
+export interface TimelapseState {
+  running: boolean;
+  frames?: number;
+  intervalMs?: number;
+  startedAt?: number;
+  nextShotAt?: number;
+  shot?: number;
+  late?: number;
+  failed?: number;
+  /** Camera clock when the state was produced, to correct for clock offset. */
+  now?: number;
+  error?: string;
+  /** Why the last run ended: completed, stopped or error. */
+  finished?: string;
 }
 
 export interface FocusOffsetResult extends FocusShiftState {
@@ -314,8 +332,31 @@ export class CameraClient {
     void fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
   }
 
-  latestPhotoUrl(ts = Date.now(), inline = false): string {
-    return `${this.baseUrl}/api/photos/latest?t=${ts}${inline ? '&inline=1' : ''}`;
+  /**
+   * The last captured JPEG. With `captureIndex` (from the Jpeg event) the camera answers 404 when
+   * that capture was already replaced by a newer one, so a slow download never saves the wrong frame.
+   */
+  latestPhotoUrl(ts = Date.now(), inline = false, captureIndex?: number): string {
+    const index = captureIndex !== undefined ? `&index=${captureIndex}` : '';
+    return `${this.baseUrl}/api/photos/latest?t=${ts}${inline ? '&inline=1' : ''}${index}`;
+  }
+
+  getTimelapse(): Promise<TimelapseState> {
+    return this.requestJson<TimelapseState>('/api/timelapse');
+  }
+
+  startTimelapse(frames: number, intervalMs: number): Promise<TimelapseState> {
+    return this.requestJson<TimelapseState>('/api/timelapse', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'start', frames: Math.round(frames), intervalMs: Math.round(intervalMs) }),
+    });
+  }
+
+  stopTimelapse(): Promise<TimelapseState> {
+    return this.requestJson<TimelapseState>('/api/timelapse', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'stop' }),
+    });
   }
 
   photoDownloadUrl(path: string): string {

@@ -20,7 +20,10 @@ The camera runs an embedded HTTP server (`MacroHttpServer`, `NanoHTTPD` on port 
 | `GET/POST /api/liveview/close` | Explicitly close an active MJPEG client by `cid` |
 | `GET  /api/liveview.jpg` | Single latest 640px JPEG live preview frame |
 | `GET  /api/photos` | Non-recursive `DCIM` folder and photo listing |
-| `GET  /api/photos/latest` | Download the latest captured JPEG |
+| `GET  /api/photos/latest` | Download the latest captured JPEG (`?index=N` for one specific capture) |
+| `GET/POST /api/timelapse` | Timelapse status; start (`{action:"start", frames, intervalMs}`) or stop (`{action:"stop"}`) |
+| `GET  /api/output.mjpeg`, `/api/output.jpg` | Live view with the output crop applied |
+| `GET/POST /api/output/crop` | Output crop (`{enabled, x, y, w, h}`, normalized, unrotated image) |
 | `GET  /api/photos/download` | Download a specific SD card file (`.JPG` or `.ARW`) |
 | `GET  /api/log` | Plain-text camera debug/crash log |
 
@@ -167,7 +170,10 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * `PreviewMagnification` / `PreviewMagnificationInfo` — `{ enabled, ratio, pos }`
 * `Shutter` — `{ status }` (`0` = OK, `1` = CANCELED, `2` = ERROR)
 * `CaptureStart` / `CaptureEnd` — `{ capturing, reason }`
-* `Jpeg` — `{ size }`
+* `Jpeg` — `{ size, captureIndex }` (`captureIndex` counts captures since app start; pass it to `/api/photos/latest?index=`)
+* `Timelapse` — same object as `GET /api/timelapse`
+* `FocusShift` — `{ ready, offset, min, max }`
+* `OutputCrop` — same object as `GET /api/output/crop`
 * `StoreImageComplete` — `{ status, DirectoryName, FileName, DirectoryNo, FileNo, MediaId }`
 * `SettingChanged` — `{ types: [...] }`
 * `EquipmentChange` — `{ deviceType, status }`
@@ -181,6 +187,8 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * **`GET|POST /api/liveview/close?cid=<clientId>`**: Immediately closes and releases the MJPEG stream matching `cid` (designed for `navigator.sendBeacon` / `fetch(..., { keepalive: true })` on tab hide, pause, or page unload). Returns `{"ok": true, "closed": true|false}`.
 * **`GET /api/liveview.jpg`**: Latest 640px hardware JPEG frame from `CameraSequence`.
 * **`GET /api/photos?dir=<relPath>&limit=100`**: Non-recursive directory listing under `DCIM` (sorted descending). Omit `dir` to list `DCIM` folders (e.g., `100MSDCF`, `101MSDCF`); pass `?dir=100MSDCF` to list photos in that folder. Returns `{ dir, totalPhotosInDir, dirs: [...], photos: [...] }`.
-* **`GET /api/photos/latest`**: Downloads the latest captured JPEG (from in-memory capture buffer or SD card).
+* **`GET /api/photos/latest`**: Downloads the latest captured JPEG (from in-memory capture buffer or SD card), with header `X-Capture-Index`. With `?index=N` it answers `404` when capture `N` was already replaced by a newer one; only the newest JPEG is kept in memory.
+* **`GET /api/timelapse`**: `{ running, frames, intervalMs, startedAt, nextShotAt, shot, late, failed, now, error?, finished? }` (camera epoch milliseconds; `finished` is `completed`, `stopped` or `error`).
+* **`POST /api/timelapse`** `{"action":"start","frames":250,"intervalMs":28800}`: starts the camera-side scheduler (interval at least 1000 ms). Shot `i` is due at `startedAt + (i-1) * intervalMs` and is taken like the shutter key; the scheduler waits for `StoreImageComplete` (up to 30 s) before the next shot, and a shot that fires after its time counts as `late` without shifting the schedule. `{"action":"stop"}` stops after the current shot. Closing the app stops it too.
 * **`GET /api/photos/download?path=<absolutePath>`**: Streams a specific SD card file (JPG or ARW).
 * **`GET /api/log`**: Returns plain-text crash/debug logs from the camera.

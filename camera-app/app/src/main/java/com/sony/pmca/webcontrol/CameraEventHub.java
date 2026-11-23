@@ -32,6 +32,7 @@ public class CameraEventHub {
             m_state.put("lastStoreImage", new JSONObject());
             m_state.put("lastShutterStatus", -1);
             m_state.put("capturing", false);
+            m_state.put("timelapse", new JSONObject().put("running", false));
             m_state.put("focusShift", new JSONObject().put("ready", false).put("offset", 0).put("min", -16).put("max", 16));
             m_state.put("lens", new JSONObject());
             m_state.put("exposureCompensation", new JSONObject());

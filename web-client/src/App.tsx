@@ -20,6 +20,7 @@ import { LiveViewPanel } from './components/LiveViewPanel';
 import { PhotoBrowser } from './components/PhotoBrowser';
 import { PhotoPreviewModal } from './components/PhotoPreviewModal';
 import { RpcInspector } from './components/RpcInspector';
+import { TimelapsePanel } from './components/TimelapsePanel';
 
 type TabKey = 'control' | 'photos' | 'events' | 'rpc';
 
@@ -66,6 +67,9 @@ function applyEventsToState(
       case 'Shutter':
         if (typeof d.status === 'number') next.lastShutterStatus = d.status;
         break;
+      case 'Timelapse':
+        next.timelapse = d as unknown as CameraState['timelapse'];
+        break;
       case 'FocusShift':
         next.focusShift = d as unknown as CameraState['focusShift'];
         break;
@@ -80,6 +84,17 @@ function applyEventsToState(
     next.seq = Math.max(next.seq ?? 0, ev.seq);
   }
   return { next, needFullRefresh };
+}
+
+interface CaptureSeries {
+  baseName: string;
+  nextIndex: number;
+  digits: number;
+}
+
+function nextSeriesFileName(series: CaptureSeries): string {
+  series.nextIndex += 1;
+  return `${series.baseName}_${String(series.nextIndex).padStart(series.digits, '0')}.jpg`;
 }
 
 function getEventsClientId(): string {
@@ -118,6 +133,14 @@ export function App() {
   const [lastSavedFile, setLastSavedFile] = useState<string | null>(null);
   const [savingStatus, setSavingStatus] = useState<string | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
+  /** Size of the last captured JPEG (Jpeg event), for timelapse transfer estimates. */
+  const [lastJpegBytes, setLastJpegBytes] = useState<number | null>(null);
+  /** Measured photo download speed (bytes/s), smoothed; null until the first download. */
+  const [transferBps, setTransferBps] = useState<number | null>(null);
+  const [timelapseSaved, setTimelapseSaved] = useState(0);
+  const [timelapseSkipped, setTimelapseSkipped] = useState(0);
+  /** This tab saves the running timelapse's frames to the PC. */
+  const [timelapsePc, setTimelapsePc] = useState(false);
 
   const seqRef = useRef<number>(0);
   const dirHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
@@ -164,8 +187,10 @@ export function App() {
 
   const handledFilesRef = useRef<Set<string>>(new Set());
   // Names a series of captures (e.g. a timelapse) base_0001.jpg, base_0002.jpg, ...
-  const captureSeriesRef = useRef<{ baseName: string; nextIndex: number; digits: number } | null>(null);
-  const saveQueueRef = useRef<Array<{ name: string; url: string; resolve?: () => void }>>([]);
+  const captureSeriesRef = useRef<CaptureSeries | null>(null);
+  // A name given as a function is taken only once the download succeeded, so a frame that
+  // could not be fetched leaves no gap in a numbered series.
+  const saveQueueRef = useRef<Array<{ name: string | (() => string); url: string; series?: boolean; resolve?: () => void }>>([]);
   const isProcessingQueueRef = useRef<boolean>(false);
 
   const processSaveQueue = useCallback(async () => {
@@ -174,20 +199,33 @@ export function App() {
     while (saveQueueRef.current.length > 0) {
       const task = saveQueueRef.current.shift();
       if (!task) break;
-      setSavingStatus(`Saving ${task.name}...`);
+      setSavingStatus(typeof task.name === 'string' ? `Saving ${task.name}...` : 'Saving photo...');
       try {
+        const started = performance.now();
         const res = await fetch(task.url);
+        if (res.status === 404 && task.series) {
+          // The camera already replaced this frame with a newer one: the series outran the link.
+          setTimelapseSkipped((n) => n + 1);
+          continue;
+        }
         if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
         const blob = await res.blob();
-        if (dirHandleRef.current) {
-          await saveBlobToDirectory(dirHandleRef.current, task.name, blob);
-        } else {
-          triggerBrowserDownload(task.name, blob);
+        const seconds = (performance.now() - started) / 1000;
+        if (blob.size > 200_000 && seconds > 0) {
+          const bps = blob.size / seconds;
+          setTransferBps((prev) => (prev === null ? bps : prev * 0.6 + bps * 0.4));
         }
-        latestSavedRef.current = { blob, name: task.name };
-        lastSavedFileRef.current = task.name;
+        const name = typeof task.name === 'function' ? task.name() : task.name;
+        if (dirHandleRef.current) {
+          await saveBlobToDirectory(dirHandleRef.current, name, blob);
+        } else {
+          triggerBrowserDownload(name, blob);
+        }
+        latestSavedRef.current = { blob, name };
+        lastSavedFileRef.current = name;
         setSavedCount((c) => c + 1);
-        setLastSavedFile(task.name);
+        setLastSavedFile(name);
+        if (task.series) setTimelapseSaved((n) => n + 1);
       } catch (err) {
         setErrorMsg(err instanceof Error ? err.message : String(err));
       } finally {
@@ -199,7 +237,7 @@ export function App() {
   }, []);
 
   const queueSavePhoto = useCallback(
-    (task: { name: string; url: string }): Promise<void> => {
+    (task: { name: string | (() => string); url: string; series?: boolean }): Promise<void> => {
       const promise = new Promise<void>((resolve) => {
         saveQueueRef.current.push({ ...task, resolve });
         void processSaveQueue();
@@ -232,11 +270,6 @@ export function App() {
   }, []);
 
   const nextCaptureFileName = useCallback(() => {
-    const series = captureSeriesRef.current;
-    if (series) {
-      series.nextIndex += 1;
-      return `${series.baseName}_${String(series.nextIndex).padStart(series.digits, '0')}.jpg`;
-    }
     const d = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
     return `capture_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.jpg`;
@@ -245,6 +278,9 @@ export function App() {
   const handleCaptureEvent = useCallback(
     (ev: CameraEvent) => {
       if (ev.type !== 'Jpeg') return;
+      const data = ev.data ?? {};
+      if (typeof data.size === 'number') setLastJpegBytes(data.size);
+      const captureIndex = typeof data.captureIndex === 'number' ? data.captureIndex : undefined;
 
       const dedupKey = `jpeg_${ev.seq}`;
       if (handledFilesRef.current.has(dedupKey)) return;
@@ -253,19 +289,69 @@ export function App() {
       }
       handledFilesRef.current.add(dedupKey);
 
+      const series = captureSeriesRef.current;
+      if (series) {
+        void queueSavePhoto({
+          name: () => nextSeriesFileName(series),
+          url: client.latestPhotoUrl(Date.now(), false, captureIndex),
+          series: true,
+        });
+        return;
+      }
+
       if (!autoSaveRef.current) {
         return;
       }
 
       void queueSavePhoto({
         name: nextCaptureFileName(),
-        url: client.latestPhotoUrl(Date.now()),
+        url: client.latestPhotoUrl(Date.now(), false, captureIndex),
       });
     },
     [client, nextCaptureFileName, queueSavePhoto],
   );
 
   const eventsCidRef = useRef<string>(getEventsClientId());
+
+  const startTimelapse = useCallback(
+    async (frames: number, intervalMs: number, saveToPc: boolean) => {
+      const d = new Date();
+      const pad = (n: number) => String(n).padStart(2, '0');
+      captureSeriesRef.current = saveToPc
+        ? {
+            baseName: `timelapse_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`,
+            nextIndex: 0,
+            digits: Math.max(4, String(frames).length),
+          }
+        : null;
+      setTimelapsePc(saveToPc);
+      setTimelapseSaved(0);
+      setTimelapseSkipped(0);
+      try {
+        const tl = await client.startTimelapse(frames, intervalMs);
+        setState((prev) => (prev ? { ...prev, timelapse: tl } : prev));
+      } catch (err) {
+        captureSeriesRef.current = null;
+        setTimelapsePc(false);
+        throw err;
+      }
+    },
+    [client],
+  );
+
+  const stopTimelapse = useCallback(async () => {
+    const tl = await client.stopTimelapse();
+    setState((prev) => (prev ? { ...prev, timelapse: tl } : prev));
+  }, [client]);
+
+  // The PC series ends with the camera run; queued downloads keep their series for naming.
+  const timelapseRunning = state?.timelapse?.running === true;
+  useEffect(() => {
+    if (!timelapseRunning) {
+      captureSeriesRef.current = null;
+      setTimelapsePc(false);
+    }
+  }, [timelapseRunning]);
 
   useEffect(() => {
     const onPageHide = () => {
@@ -538,6 +624,19 @@ export function App() {
                 client={client}
                 connected={connected}
                 focusShift={state?.focusShift}
+                onError={setErrorMsg}
+              />
+              <TimelapsePanel
+                connected={connected}
+                timelapse={state?.timelapse}
+                lastJpegBytes={lastJpegBytes}
+                transferBps={transferBps}
+                pcSaved={timelapseSaved}
+                pcSkipped={timelapseSkipped}
+                pcSeriesActive={timelapsePc}
+                saveTarget={saveDirName ? `folder ${saveDirName}` : 'browser downloads'}
+                onStart={startTimelapse}
+                onStop={stopTimelapse}
                 onError={setErrorMsg}
               />
               <AutoSavePanel

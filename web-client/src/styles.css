@@ -1156,3 +1156,101 @@ body {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.75rem;
 }
+
+/* Timelapse */
+.badge-live {
+  background: rgba(63, 185, 80, 0.18);
+  color: var(--ok);
+}
+
+.timelapse-form {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.timelapse-form label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.timelapse-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text);
+}
+
+.timelapse-form .input-sm {
+  width: 64px;
+}
+
+.timelapse-form select.input-sm {
+  width: auto;
+}
+
+.input-sm.input-xs {
+  width: 52px;
+  padding: 2px 5px;
+  font-size: 0.78rem;
+}
+
+.timelapse-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0 0 10px;
+  font-size: 0.82rem;
+}
+
+.timelapse-grid dt {
+  color: var(--muted);
+}
+
+.timelapse-grid dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.timelapse-photo-size {
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.timelapse-pc {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 0.82rem;
+  margin-bottom: 6px;
+}
+
+.timelapse-note {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.timelapse-warn {
+  color: var(--danger);
+}
+
+.timelapse-progress {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-border);
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.timelapse-progress span {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+  transition: width 0.3s ease-out;
+}
