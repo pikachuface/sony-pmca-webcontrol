@@ -12,7 +12,22 @@ android {
         versionName "1.0.0"
     }
 
+    // One committed debug key for every build machine and CI run. A camera keeps the
+    // signature of the installed app, so a per-machine random key would make updates
+    // from different builders incompatible. This key protects nothing; do not reuse it.
+    signingConfigs {
+        debug {
+            storeFile file('../debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
