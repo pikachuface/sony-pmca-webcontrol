@@ -183,7 +183,42 @@ public class MacroHttpServer extends NanoHTTPD {
             if ("/api/liveview.mjpeg".equals(uri)) {
                 String cid = params.get("cid");
                 LiveViewManager.MjpegClient client = m_activity.getLiveViewManager().acquireMjpegClient(cid);
-                return new MjpegStreamResponse(client);
+                return new MjpegStreamResponse(client, false);
+            }
+
+            // Output stream: the live view with the crop from /api/output/crop applied.
+            if ("/api/output.mjpeg".equals(uri)) {
+                String cid = params.get("cid");
+                LiveViewManager.MjpegClient client = m_activity.getLiveViewManager().acquireMjpegClient(cid);
+                return new MjpegStreamResponse(client, true);
+            }
+
+            if ("/api/output.jpg".equals(uri)) {
+                LiveViewManager.LiveViewFrame frame = m_activity.getLiveViewManager().getLatestFrame();
+                byte[] jpeg = frame != null ? m_activity.getOutputCropper().apply(frame.seq, frame.jpeg) : null;
+                if (jpeg == null) {
+                    return addCors(new Response(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "No preview frame yet"));
+                }
+                Response res = new Response(Response.Status.OK, "image/jpeg", new ByteArrayInputStream(jpeg));
+                res.addHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+                return addCors(res);
+            }
+
+            if ("/api/output/crop".equals(uri)) {
+                OutputCropper cropper = m_activity.getOutputCropper();
+                if (Method.POST.equals(method)) {
+                    JSONObject body = parseJsonBody(session);
+                    if (body.optBoolean("enabled", true)) {
+                        cropper.set((float) body.getDouble("x"), (float) body.getDouble("y"),
+                                (float) body.getDouble("w"), (float) body.getDouble("h"));
+                    } else {
+                        cropper.clear();
+                    }
+                    JSONObject crop = cropper.toJson();
+                    m_activity.getEventHub().setState("outputCrop", crop);
+                    m_activity.getEventHub().emit("OutputCrop", crop);
+                }
+                return jsonOk(cropper.toJson().toString());
             }
 
             if ("/api/liveview/close".equals(uri)) {
@@ -432,10 +467,12 @@ public class MacroHttpServer extends NanoHTTPD {
 
     private class MjpegStreamResponse extends Response {
         private final LiveViewManager.MjpegClient m_client;
+        private final boolean m_cropped;
 
-        MjpegStreamResponse(LiveViewManager.MjpegClient client) {
+        MjpegStreamResponse(LiveViewManager.MjpegClient client, boolean cropped) {
             super(Status.OK, "multipart/x-mixed-replace; boundary=frame", "");
             m_client = client;
+            m_cropped = cropped;
         }
 
         @Override
@@ -462,11 +499,12 @@ public class MacroHttpServer extends NanoHTTPD {
                         continue;
                     }
                     lastSeq = frame.seq;
+                    byte[] jpeg = m_cropped ? m_activity.getOutputCropper().apply(frame.seq, frame.jpeg) : frame.jpeg;
                     String partHeader = "--frame\r\n"
                             + "Content-Type: image/jpeg\r\n"
-                            + "Content-Length: " + frame.jpeg.length + "\r\n\r\n";
+                            + "Content-Length: " + jpeg.length + "\r\n\r\n";
                     outputStream.write(partHeader.getBytes("UTF-8"));
-                    outputStream.write(frame.jpeg);
+                    outputStream.write(jpeg);
                     outputStream.write("\r\n".getBytes("UTF-8"));
                     outputStream.flush();
                 }

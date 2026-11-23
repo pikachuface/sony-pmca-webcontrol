@@ -207,6 +207,14 @@ public class LiveViewManager {
         }
     }
 
+    /** Latest frame with its sequence number (for consumers that cache per frame). */
+    public LiveViewFrame getLatestFrame() {
+        fetchPreviewFrame(33);
+        synchronized (m_frameLock) {
+            return m_latestJpeg != null ? new LiveViewFrame(m_frameSeq, m_latestJpeg) : null;
+        }
+    }
+
     public byte[] getLatestLiveViewJpeg() {
         fetchPreviewFrame(33);
         synchronized (m_frameLock) {

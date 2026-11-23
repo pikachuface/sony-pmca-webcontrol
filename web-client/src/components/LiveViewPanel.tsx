@@ -1,5 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { CameraClient } from '../api/cameraClient';
+import { CropOverlay } from './CropOverlay';
+import { clamp, containBox, rectDisplayToImage, rectImageToDisplay, type NRect } from './viewGeometry';
+
+const MAX_PREVIEW_ZOOM = 4;
+/** Pointer travel (px) after which a press on the zoomed view pans instead of autofocusing. */
+const PAN_THRESHOLD_PX = 4;
 
 interface LiveViewPanelProps {
   client: CameraClient;
@@ -59,6 +65,21 @@ export function LiveViewPanel({
   const liveViewCidRef = useRef<string>(getLiveViewClientId());
   const afTimerRef = useRef<number | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const [stageSize, setStageSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  const [frameDims, setFrameDims] = useState<{ w: number; h: number }>({ w: 640, h: 424 });
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const panDragRef = useRef<{ pointerId: number; lastX: number; lastY: number; moved: number } | null>(null);
+  const suppressClickRef = useRef(false);
+  // Output crop in unrotated image coordinates, as the camera applies it; null = no crop.
+  const [cropImage, setCropImage] = useState<NRect | null>(null);
+  // Crop while it is being dragged, in display coordinates.
+  const [cropDraft, setCropDraft] = useState<NRect | null>(null);
+  const [cropEditing, setCropEditing] = useState(false);
+  const [framed, setFramed] = useState(false);
+  const [outputCopied, setOutputCopied] = useState(false);
+  const outputUrlRef = useRef<HTMLInputElement | null>(null);
 
   const clearAfTimer = () => {
     if (afTimerRef.current !== null) {
@@ -178,6 +199,7 @@ export function LiveViewPanel({
             if (canvas.width !== targetW || canvas.height !== targetH) {
               canvas.width = targetW;
               canvas.height = targetH;
+              setFrameDims({ w: targetW, h: targetH });
             }
             const needPixels = peakingRef.current || showHistogramRef.current;
             const ctx = canvas.getContext('2d', { willReadFrequently: needPixels });
@@ -362,7 +384,11 @@ export function LiveViewPanel({
   }, [client, connected, streaming, pageVisible, lvMode]);
 
   const handleCanvasClick = async (e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!connected) return;
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    if (!connected || cropEditing) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
     const rect = canvas.getBoundingClientRect();
@@ -420,6 +446,128 @@ export function LiveViewPanel({
       scheduleAfDismiss(2000);
       onError?.(err instanceof Error ? err.message : String(err));
     }
+  };
+
+  // Stage size drives the contain box and the zoom/frame transform.
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const update = () => setStageSize({ w: el.clientWidth, h: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // The output crop lives in the camera; pick it up on (re)connect.
+  useEffect(() => {
+    if (!connected) return;
+    let cancelled = false;
+    client
+      .getOutputCrop()
+      .then((c) => {
+        if (!cancelled) setCropImage(c.enabled ? { x: c.x, y: c.y, w: c.w, h: c.h } : null);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [client, connected]);
+
+  const box = containBox(stageSize.w, stageSize.h, frameDims.w, frameDims.h);
+  const cropDisplay = cropDraft ?? (cropImage ? rectImageToDisplay(cropImage, rotationDeg) : null);
+  const isFramed = framed && cropImage !== null;
+
+  // View transform (origin top-left): Frame fits the crop to the stage, otherwise preview zoom + pan.
+  let viewScale = 1;
+  let viewX = 0;
+  let viewY = 0;
+  if (isFramed && cropDisplay && cropDisplay.w > 0 && cropDisplay.h > 0 && box.width > 0) {
+    const cw = cropDisplay.w * box.width;
+    const ch = cropDisplay.h * box.height;
+    viewScale = Math.min(stageSize.w / cw, stageSize.h / ch);
+    const cx = box.left + (cropDisplay.x + cropDisplay.w / 2) * box.width;
+    const cy = box.top + (cropDisplay.y + cropDisplay.h / 2) * box.height;
+    viewX = stageSize.w / 2 - viewScale * cx;
+    viewY = stageSize.h / 2 - viewScale * cy;
+  } else if (previewZoom > 1) {
+    viewScale = previewZoom;
+    viewX = (stageSize.w - stageSize.w * viewScale) / 2 + pan.x;
+    viewY = (stageSize.h - stageSize.h * viewScale) / 2 + pan.y;
+  }
+  const viewTransform =
+    viewScale === 1 && viewX === 0 && viewY === 0
+      ? undefined
+      : `translate(${viewX}px, ${viewY}px) scale(${viewScale})`;
+
+  const clampPan = (x: number, y: number, zoom: number) => {
+    const maxX = (stageSize.w * zoom - stageSize.w) / 2;
+    const maxY = (stageSize.h * zoom - stageSize.h) / 2;
+    return { x: clamp(x, -maxX, maxX), y: clamp(y, -maxY, maxY) };
+  };
+
+  const changeZoom = (zoom: number) => {
+    setPreviewZoom(zoom);
+    setPan((p) => (zoom <= 1 ? { x: 0, y: 0 } : clampPan(p.x, p.y, zoom)));
+  };
+
+  const onViewPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    suppressClickRef.current = false;
+    if (previewZoom <= 1 || isFramed || cropEditing || e.button !== 0) return;
+    panDragRef.current = { pointerId: e.pointerId, lastX: e.clientX, lastY: e.clientY, moved: 0 };
+  };
+
+  const onViewPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const dx = e.clientX - drag.lastX;
+    const dy = e.clientY - drag.lastY;
+    drag.lastX = e.clientX;
+    drag.lastY = e.clientY;
+    drag.moved += Math.abs(dx) + Math.abs(dy);
+    if (drag.moved > PAN_THRESHOLD_PX) {
+      viewportRef.current?.setPointerCapture(e.pointerId);
+      setPan((p) => clampPan(p.x + dx, p.y + dy, previewZoom));
+    }
+  };
+
+  const onViewPointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = panDragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    panDragRef.current = null;
+    if (drag.moved > PAN_THRESHOLD_PX) suppressClickRef.current = true;
+  };
+
+  const commitCrop = (displayRect: NRect) => {
+    const img = rectDisplayToImage(displayRect, rotationDeg);
+    setCropImage(img);
+    setCropDraft(null);
+    void client.setOutputCrop(img).catch((err) => {
+      onError?.(err instanceof Error ? err.message : String(err));
+    });
+  };
+
+  const clearCrop = () => {
+    setCropImage(null);
+    setCropDraft(null);
+    setCropEditing(false);
+    setFramed(false);
+    void client.setOutputCrop(null).catch((err) => {
+      onError?.(err instanceof Error ? err.message : String(err));
+    });
+  };
+
+  const copyOutputUrl = async () => {
+    const url = client.outputMjpegUrl();
+    try {
+      await navigator.clipboard.writeText(url);
+    } catch {
+      // The Clipboard API needs a secure context; the camera serves plain HTTP.
+      outputUrlRef.current?.select();
+      document.execCommand('copy');
+    }
+    setOutputCopied(true);
+    window.setTimeout(() => setOutputCopied(false), 1500);
   };
 
   return (
@@ -547,6 +695,41 @@ export function LiveViewPanel({
           </button>
           <button
             type="button"
+            className={`btn btn-sm ${cropEditing ? 'btn-active' : ''}`}
+            disabled={!connected || isFramed}
+            onClick={() => setCropEditing((v) => !v)}
+            title={cropEditing ? 'Finish editing the crop' : 'Crop the output: drag a rectangle on the image'}
+            aria-pressed={cropEditing}
+          >
+            ✂ Crop
+          </button>
+          {cropImage && (
+            <>
+              <button
+                type="button"
+                className={`btn btn-sm ${isFramed ? 'btn-active' : ''}`}
+                onClick={() => {
+                  setCropEditing(false);
+                  setFramed((f) => !f);
+                }}
+                title={isFramed ? 'Show the whole image' : 'Zoom the view to the crop'}
+                aria-pressed={isFramed}
+              >
+                ▣ Frame
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={clearCrop}
+                title="Remove the crop (output becomes the full image)"
+                aria-label="Remove crop"
+              >
+                ✕
+              </button>
+            </>
+          )}
+          <button
+            type="button"
             className={`btn btn-sm ${isFullscreen ? 'btn-active' : ''}`}
             onClick={toggleFullscreen}
             title={isFullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
@@ -557,14 +740,38 @@ export function LiveViewPanel({
         </div>
       </div>
 
-      <div className="liveview-stage" ref={stageRef}>
-        <canvas
-          ref={canvasRef}
-          className="liveview-canvas"
-          style={{ cursor: 'crosshair' }}
-          onClick={(e) => void handleCanvasClick(e)}
-          title="Click image to autofocus here"
-        />
+      <div className={`liveview-stage ${isFramed ? 'is-framed' : ''}`} ref={stageRef}>
+        <div
+          ref={viewportRef}
+          className="liveview-viewport"
+          style={{ transform: viewTransform }}
+          onPointerDown={onViewPointerDown}
+          onPointerMove={onViewPointerMove}
+          onPointerUp={onViewPointerUp}
+          onPointerCancel={onViewPointerUp}
+        >
+          <canvas
+            ref={canvasRef}
+            className="liveview-canvas"
+            style={{ cursor: previewZoom > 1 && !isFramed ? 'grab' : 'crosshair' }}
+            onClick={(e) => void handleCanvasClick(e)}
+            title="Click image to autofocus here"
+          />
+          {(cropDisplay || cropEditing) && (
+            <div
+              className="crop-layer"
+              style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
+            >
+              <CropOverlay
+                rect={cropDisplay}
+                editing={cropEditing && !isFramed}
+                framed={isFramed}
+                onChange={setCropDraft}
+                onCommit={commitCrop}
+              />
+            </div>
+          )}
+        </div>
         {showHistogram && connected && streaming && !frameError && (
           <canvas
             ref={histCanvasRef}
@@ -576,6 +783,28 @@ export function LiveViewPanel({
         {(!connected || frameError) && (
           <div className="liveview-placeholder">
             {!connected ? 'Not connected to camera' : frameError}
+          </div>
+        )}
+        {!isFramed && connected && (
+          <div className="preview-zoom" title="Preview zoom (drag the image to pan)">
+            <input
+              type="range"
+              className="preview-zoom-slider"
+              min={1}
+              max={MAX_PREVIEW_ZOOM}
+              step={0.1}
+              value={previewZoom}
+              onChange={(e) => changeZoom(Number(e.target.value))}
+              aria-label="Preview zoom"
+            />
+            <button
+              type="button"
+              className="preview-zoom-label"
+              onClick={() => changeZoom(1)}
+              title="Reset preview zoom"
+            >
+              {previewZoom.toFixed(1)}×
+            </button>
           </div>
         )}
         {isFullscreen && (
@@ -602,7 +831,21 @@ export function LiveViewPanel({
       </div>
 
       <div className="toolbar-row" style={{ marginTop: 8, justifyContent: 'space-between', alignItems: 'center' }}>
-        <span className="muted-tag">Click the image to autofocus there</span>
+        <div className="output-url-row">
+          <span className="muted-tag">{cropImage ? 'Cropped output' : 'Output'}</span>
+          <input
+            ref={outputUrlRef}
+            className="input-sm output-url"
+            readOnly
+            value={client.outputMjpegUrl()}
+            onFocus={(e) => e.currentTarget.select()}
+            aria-label="Output stream URL"
+            title="MJPEG stream with the crop applied (OBS media source, ffmpeg, VLC)"
+          />
+          <button type="button" className="btn btn-sm" onClick={() => void copyOutputUrl()}>
+            {outputCopied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
         <div className="toolbar-row" style={{ gap: 6 }}>
           {afStatus !== 'idle' && (
             <span className="badge">

@@ -93,6 +93,12 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         return m_goalController;
     }
 
+    private final OutputCropper m_outputCropper = new OutputCropper();
+
+    public OutputCropper getOutputCropper() {
+        return m_outputCropper;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);

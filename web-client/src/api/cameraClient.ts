@@ -125,6 +125,14 @@ export interface AutoFocusResult {
   position?: number;
 }
 
+export interface OutputCrop {
+  enabled: boolean;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface ShiftFocusResult {
   requested: number;
   applied: number;
@@ -255,6 +263,23 @@ export class CameraClient {
   liveViewMjpegUrl(cid?: string): string {
     const query = cid ? `?cid=${encodeURIComponent(cid)}` : '';
     return `${this.baseUrl}/api/liveview.mjpeg${query}`;
+  }
+
+  /** Absolute URL of the cropped output stream, for OBS, ffmpeg or a second browser. */
+  outputMjpegUrl(): string {
+    return new URL(`${this.baseUrl}/api/output.mjpeg`, window.location.href).toString();
+  }
+
+  getOutputCrop(): Promise<OutputCrop> {
+    return this.requestJson<OutputCrop>('/api/output/crop');
+  }
+
+  /** Sets the output crop (normalized, unrotated image coordinates), or clears it with null. */
+  setOutputCrop(rect: { x: number; y: number; w: number; h: number } | null): Promise<OutputCrop> {
+    return this.requestJson<OutputCrop>('/api/output/crop', {
+      method: 'POST',
+      body: JSON.stringify(rect ? { enabled: true, ...rect } : { enabled: false }),
+    });
   }
 
   liveViewJpgUrl(ts = Date.now()): string {
