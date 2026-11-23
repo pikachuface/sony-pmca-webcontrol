@@ -8,6 +8,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Event-driven, device-side closed-loop controller for camera parameters that
@@ -166,9 +169,9 @@ public class CameraGoalController {
         }
         if ("shiftFocus".equals(method)) {
             if (args == null || args.length() < 1) {
-                throw new IllegalArgumentException("shiftFocus requires (steps)");
+                throw new IllegalArgumentException("shiftFocus requires (steps[, skipAfCheck])");
             }
-            return shiftFocus(args.getInt(0));
+            return shiftFocus(args.getInt(0), args.length() >= 2 && args.getBoolean(1));
         }
         throw new NoSuchMethodException("Unknown highlevel method: " + method);
     }
@@ -177,13 +180,29 @@ public class CameraGoalController {
 
     /** Largest |steps| one shiftFocusPosition call accepts when the body does not report it. */
     private static final int DEFAULT_MAX_FOCUS_SHIFT = 16;
+    /** A shiftFocusPosition call normally returns in 130-220 ms on the ILCE-7. */
+    private static final long FOCUS_SHIFT_TIMEOUT_MS = 2500L;
+
+    /** Set once an autoFocusAt succeeded; see shiftFocus. */
+    private volatile boolean m_afEstablished;
+    /** True while a shiftFocusPosition call has not returned (possibly blocked forever). */
+    private volatile boolean m_shiftInFlight;
 
     /**
      * Moves focus by a relative number of steps with CameraEx.shiftFocusPosition, split into
      * calls no larger than the body's getMaxFocusShift(). Bodies without focus drive (such as
      * the ILCE-7) support this but report no position, so the result has no absolute focus.
+     *
+     * On the ILCE-7 shiftFocusPosition returned in ~150 ms after an AF, but blocked
+     * indefinitely when called after app start without one (and upstream saw it block the
+     * ILCE-6000). Two guards follow from that: shifts are refused until an autoFocusAt has
+     * succeeded (skipAfCheck bypasses this for diagnosis), and the call runs on its own thread
+     * with a timeout, so a blocked call cannot freeze the main thread and every other control.
      */
-    private JSONObject shiftFocus(int steps) throws Exception {
+    private JSONObject shiftFocus(int steps, boolean skipAfCheck) throws Exception {
+        if (!m_afEstablished && !skipAfCheck) {
+            throw new IllegalStateException("Focus shift needs an autofocus first: click the live view to AF, then use the knob");
+        }
         synchronized (m_focusOpLock) {
             final int maxChunk = Math.max(1, queryMaxFocusShift());
             int remaining = steps;
@@ -192,15 +211,9 @@ public class CameraGoalController {
             boolean accepted = true;
             while (remaining != 0) {
                 final int chunk = Math.max(-maxChunk, Math.min(maxChunk, remaining));
-                Boolean ok = m_activity.runOnMainSync(new Callable<Boolean>() {
-                    @Override
-                    public Boolean call() {
-                        CameraEx cam = m_activity.getCameraEx();
-                        return cam != null && cam.shiftFocusPosition(chunk);
-                    }
-                }, MacroServerActivity.MAIN_THREAD_TIMEOUT_MS);
+                boolean ok = callShiftFocusPosition(chunk);
                 calls++;
-                if (ok == null || !ok) {
+                if (!ok) {
                     accepted = false;
                     break;
                 }
@@ -215,6 +228,47 @@ public class CameraGoalController {
             obj.put("maxStepsPerCall", maxChunk);
             return obj;
         }
+    }
+
+    /** Runs one shiftFocusPosition on a dedicated thread; never on the main thread. */
+    private boolean callShiftFocusPosition(final int chunk) throws Exception {
+        if (m_shiftInFlight) {
+            throw new IllegalStateException("A previous focus shift is still blocked in the camera; restart the app to recover focus control");
+        }
+        final CameraEx cam = m_activity.getCameraEx();
+        if (cam == null) {
+            throw new IllegalStateException("Camera not initialized");
+        }
+        final boolean[] result = new boolean[]{false};
+        final Throwable[] error = new Throwable[]{null};
+        final CountDownLatch done = new CountDownLatch(1);
+        m_shiftInFlight = true;
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    result[0] = cam.shiftFocusPosition(chunk);
+                } catch (Throwable t) {
+                    error[0] = t;
+                } finally {
+                    m_shiftInFlight = false;
+                    done.countDown();
+                }
+            }
+        }, "focus-shift");
+        worker.setDaemon(true);
+        worker.start();
+        if (!done.await(FOCUS_SHIFT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            throw new TimeoutException("shiftFocusPosition(" + chunk + ") did not return within "
+                    + FOCUS_SHIFT_TIMEOUT_MS + " ms; focus shift is disabled until it does");
+        }
+        if (error[0] instanceof Exception) {
+            throw (Exception) error[0];
+        }
+        if (error[0] != null) {
+            throw new RuntimeException(error[0]);
+        }
+        return result[0];
     }
 
     private int queryMaxFocusShift() {
@@ -473,6 +527,9 @@ public class CameraGoalController {
             int pos;
             synchronized (m_focus) {
                 pos = m_focus.v1;
+            }
+            if (afSuccess[0]) {
+                m_afEstablished = true;
             }
             JSONObject res = new JSONObject();
             res.put("focused", afSuccess[0]);
