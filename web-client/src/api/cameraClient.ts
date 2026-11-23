@@ -55,8 +55,7 @@ export interface CameraState {
   };
   lastShutterStatus?: number;
   capturing?: boolean;
-  /** True once an autofocus succeeded; the camera refuses focus shifts before that. */
-  focusShiftReady?: boolean;
+  focusShift?: FocusShiftState;
   lens?: {
     LensName?: string;
     LensType?: string;
@@ -135,12 +134,22 @@ export interface OutputCrop {
   h: number;
 }
 
-export interface ShiftFocusResult {
+/**
+ * Focus offset from the last autofocus position (CameraEx.shiftFocusPosition). `ready` turns
+ * true after the first successful autofocus; a new autofocus resets `offset` to 0.
+ */
+export interface FocusShiftState {
+  ready: boolean;
+  offset: number;
+  min: number;
+  max: number;
+}
+
+export interface FocusOffsetResult extends FocusShiftState {
   requested: number;
-  applied: number;
   accepted: boolean;
-  calls: number;
-  maxStepsPerCall: number;
+  /** The request was outside min..max and was clamped. */
+  atLimit: boolean;
 }
 
 const STORAGE_KEY = 'pmca_camera_base_url';
@@ -437,8 +446,14 @@ export class CameraClient {
    * Relative focus move via `highlevel.shiftFocus` (CameraEx.shiftFocusPosition). Works on
    * bodies without focus drive, such as the ILCE-7, but reports no absolute position.
    */
-  shiftFocus(steps: number, signal?: AbortSignal): Promise<ShiftFocusResult> {
-    return this.call<ShiftFocusResult>('highlevel', 'shiftFocus', [Math.round(steps)], signal);
+  /** Sets focus to the last AF position plus `offset` steps (clamped by the camera). */
+  setFocusOffset(offset: number, signal?: AbortSignal): Promise<FocusOffsetResult> {
+    return this.call<FocusOffsetResult>('highlevel', 'setFocusOffset', [Math.round(offset)], signal);
+  }
+
+  /** Moves the focus offset by `steps` relative to its current value. */
+  shiftFocus(steps: number, signal?: AbortSignal): Promise<FocusOffsetResult> {
+    return this.call<FocusOffsetResult>('highlevel', 'shiftFocus', [Math.round(steps)], signal);
   }
 }
 

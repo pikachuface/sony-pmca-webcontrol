@@ -59,13 +59,15 @@ Executes sequentially on the camera main thread in a single HTTP round-trip. **C
 | `"static:Settings"` | `com.sony.scalar.sysutil.didep.Settings` | `getTargetMediaId`, `getUsingMedia`, `isLiveAndRec`. |
 | `"static:Temperature"` | `com.sony.scalar.sysutil.didep.Temperature` | `getStatus` — instantiates, reads `Temperature.Status` public fields, and releases safely. |
 | `"static:System"` | Android System / `BatteryManager` | `getBattery` — returns `{ level, scale, percent, status, plugged }`. |
-| `"highlevel"` | `CameraGoalController` | Device-side event-driven closed-loop setters (`setFocusPosition`, `setAperture`, `setShutterSpeed`, `setZoomPosition`) and the relative `shiftFocus`. Runs on HTTP worker thread without blocking camera UI. |
+| `"highlevel"` | `CameraGoalController` | Device-side event-driven closed-loop setters (`setFocusPosition`, `setAperture`, `setShutterSpeed`, `setZoomPosition`) and the focus offset methods `setFocusOffset` / `shiftFocus`. Runs on HTTP worker thread without blocking camera UI. |
 
 ### High-Level Closed-Loop APIs (`target: "highlevel"`)
 Sony `CameraEx` does not expose absolute setters for focus, aperture, shutter speed, or optical zoom — only relative stepping methods. `CameraGoalController` drives these in a tight local closed loop using hardware listener callbacks:
 
 * **`setFocusPosition(targetPos[, tolerance])`**: Drives MF position using `startOneShotFocusDrive` until within `tolerance` (default `2`). Needs focus drive support; the `ILCE-7` has none (`getMaxFocusDriveSpeed()` is `0`) and fails with `Focus position unavailable`.
-* **`shiftFocus(steps)`**: Moves focus by a relative number of steps with `CameraEx.shiftFocusPosition`, split into calls of at most `getMaxFocusShift()` steps (16 on the `ILCE-7`). Works on bodies without focus drive but reports no position. Returns `{ requested, applied, accepted, calls, maxStepsPerCall }`; `accepted: false` means the camera refused a call and the rest was not applied.
+* **`setFocusOffset(offset)`**: Sets focus to the last autofocus position plus `offset` steps, clamped to `±getMaxFocusShift()` (16 on the `ILCE-7`), with one `CameraEx.shiftFocusPosition(offset)` call. `shiftFocusPosition` is not a relative move: on the `ILCE-7` repeating `shiftFocusPosition(16)` leaves focus where the first call put it. Refused until an `autoFocusAt` has succeeded (calling `shiftFocusPosition` before any AF blocked the `ILCE-7` main thread); each successful `autoFocusAt` resets the offset to `0`. Returns `{ ready, offset, min, max, requested, accepted, atLimit }`.
+* **`shiftFocus(steps)`**: `setFocusOffset(currentOffset + steps)`.
+* State key `focusShift` (`{ ready, offset, min, max }`) and the `FocusShift` event carry the current offset.
 * **`setAperture(fValue100)`**: Steps `incrementAperture` / `decrementAperture` until reaching `fValue100` (e.g., `800` for `F8.0`, clamped to `currentAvailableMin`..`currentAvailableMax`).
 * **`setShutterSpeed(numerator, denominator)`**: Steps `incrementShutterSpeed` / `decrementShutterSpeed` until reaching `numerator / denominator` seconds (e.g., `[1, 125]` for `1/125s`).
 * **`setZoomPosition(opticalPosition[, tolerance])`**: Steps `startZoom` / `stopZoom` until reaching `opticalPosition` (default tolerance `1`).
@@ -98,7 +100,7 @@ Sony `CameraEx` does not expose absolute setters for focus, aperture, shutter sp
 
 ### Security Blacklist
 To prevent destabilizing the camera session or overwriting event hooks, the following are blocked:
-* `open`, `reopen`, `release`, `getNormalCamera`, `create*`, `withSupportedParameters`, `tryIgnoreInhibit`, `shiftFocusPosition` (blocks/hangs on `ILCE-6000` main thread; use `highlevel.shiftFocus` instead)
+* `open`, `reopen`, `release`, `getNormalCamera`, `create*`, `withSupportedParameters`, `tryIgnoreInhibit`, `shiftFocusPosition` (blocks/hangs on `ILCE-6000` main thread; use `highlevel.setFocusOffset` instead)
 * All `set*Listener`, `set*Callback`, and methods taking interface/callback arguments (callbacks are handled centrally and streamed via `/api/events`).
 
 > **Caution (Preview Pipeline Rebuild):** Setting structural parameters such as `setImageSize`, `setImageAspectRatio`, `setRawRecMode`, `setPictureStorageFormat`, or `setDriveMode` may cause the camera firmware to rebuild its preview pipeline, briefly interrupting LiveView.

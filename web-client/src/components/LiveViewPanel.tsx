@@ -122,8 +122,6 @@ export function LiveViewPanel({
     }
   };
   // Keep overlay flags in refs so toggling them doesn't reconnect the MJPEG stream
-  const showGridRef = useRef(showGrid);
-  showGridRef.current = showGrid;
   const peakingRef = useRef(peaking);
   peakingRef.current = peaking;
   const showHistogramRef = useRef(showHistogram);
@@ -246,9 +244,6 @@ export function LiveViewPanel({
                 );
               }
 
-              if (showGridRef.current) {
-                drawGrid(ctx, canvas.width, canvas.height);
-              }
             }
           }
           bitmap.close();
@@ -499,6 +494,25 @@ export function LiveViewPanel({
     viewScale === 1 && viewX === 0 && viewY === 0
       ? undefined
       : `translate(${viewX}px, ${viewY}px) scale(${viewScale})`;
+
+  // Rule-of-thirds grid in stage pixels: over the crop when there is one (that is the output
+  // composition), else over the whole image. Drawn outside the transformed viewport so the
+  // lines stay 1px sharp at any zoom.
+  const gridBase =
+    cropDisplay && cropDisplay.w > 0 && cropDisplay.h > 0
+      ? {
+          left: box.left + cropDisplay.x * box.width,
+          top: box.top + cropDisplay.y * box.height,
+          width: cropDisplay.w * box.width,
+          height: cropDisplay.h * box.height,
+        }
+      : box;
+  const gridRect = {
+    left: viewX + viewScale * gridBase.left,
+    top: viewY + viewScale * gridBase.top,
+    width: viewScale * gridBase.width,
+    height: viewScale * gridBase.height,
+  };
 
   const clampPan = (x: number, y: number, zoom: number) => {
     const maxX = (stageSize.w * zoom - stageSize.w) / 2;
@@ -772,6 +786,14 @@ export function LiveViewPanel({
             </div>
           )}
         </div>
+        {showGrid && connected && streaming && !frameError && gridRect.width > 0 && gridRect.height > 0 && (
+          <div className="grid-overlay" style={gridRect} aria-hidden="true">
+            <span className="grid-line grid-line-v" style={{ left: '33.333%' }} />
+            <span className="grid-line grid-line-v" style={{ left: '66.667%' }} />
+            <span className="grid-line grid-line-h" style={{ top: '33.333%' }} />
+            <span className="grid-line grid-line-h" style={{ top: '66.667%' }} />
+          </div>
+        )}
         {showHistogram && connected && streaming && !frameError && (
           <canvas
             ref={histCanvasRef}
@@ -870,23 +892,6 @@ function findHeaderEnd(buf: Uint8Array): number {
     }
   }
   return -1;
-}
-
-function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
-  ctx.save();
-  ctx.strokeStyle = 'rgba(255, 255, 255, 0.28)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(w / 3, 0);
-  ctx.lineTo(w / 3, h);
-  ctx.moveTo((2 * w) / 3, 0);
-  ctx.lineTo((2 * w) / 3, h);
-  ctx.moveTo(0, h / 3);
-  ctx.lineTo(w, h / 3);
-  ctx.moveTo(0, (2 * h) / 3);
-  ctx.lineTo(w, (2 * h) / 3);
-  ctx.stroke();
-  ctx.restore();
 }
 
 function drawHistogram(canvas: HTMLCanvasElement, data: Uint8ClampedArray) {

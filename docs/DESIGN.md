@@ -54,7 +54,7 @@ Internally, PlayMemories-capable Sony cameras run an embedded **Android 2.3.3 (A
 |                  Web Client (web-client/, React + TS)                 |
 |  - CameraClient SDK (src/api/cameraClient.ts)                         |
 |  - LiveViewPanel (MJPEG/JPG, Peaking, Histogram, full screen)       |
-|  - FocusControl (relative focus knob via highlevel.shiftFocus)       |
+|  - FocusControl (focus offset knob via highlevel.setFocusOffset)     |
 |  - ExposureControl, PhotoBrowser, AutoSavePanel, RpcInspector         |
 +-----------------------------------------------------------------------+
 ```
@@ -69,7 +69,7 @@ Internally, PlayMemories-capable Sony cameras run an embedded **Android 2.3.3 (A
 * Because `CameraEx` does not expose absolute setters for focus (`shiftFocusPosition()` hangs on `ILCE-6000`), aperture, shutter speed, or optical zoom, `CameraGoalController.java` implements event-driven closed-loop positioning on the camera under `target: "highlevel"`:
   * **Zero UI Blocking**: Waiting for hardware listener callbacks (`FocusDrive`, `ApertureChange`, `ShutterSpeedChange`, `ZoomChange`) runs on the calling HTTP worker thread, while each single drive step is dispatched briefly to the main thread via `runOnMainSync`.
   * **Per-Parameter Isolation & Latest-Wins Preemption**: Focus, aperture, shutter, and zoom run in independent `GoalSlot`s so different parameters execute in parallel, while a newer target for the same parameter increments `generationId` and immediately supersedes any in-flight request (`superseded: true`).
-* **Bodies without focus drive (`ILCE-7`)**: `setFocusPosition` depends on `FocusDrive` events, which the `ILCE-7` never sends (`getMaxFocusDriveSpeed()` is `0`). `highlevel.shiftFocus(steps)` instead calls `shiftFocusPosition()` in chunks of at most `getMaxFocusShift()` steps under the focus lock; it is open loop, with no position feedback. `FocusControl.tsx` drives it from a knob and keeps at most one request in flight, merging detents turned meanwhile into the next request.
+* **Bodies without focus drive (`ILCE-7`)**: `setFocusPosition` depends on `FocusDrive` events, which the `ILCE-7` never sends (`getMaxFocusDriveSpeed()` is `0`). The only focus control is `shiftFocusPosition(n)`, which sets focus to the last AF position plus `n` (`|n| <= getMaxFocusShift()`, 16), not a relative move. `highlevel.setFocusOffset(n)` tracks that offset under the focus lock, resets it to `0` after each successful `autoFocusAt`, and publishes it as state `focusShift`. `FocusControl.tsx` shows it as a knob with end stops; it keeps at most one request in flight and sends only the latest dialled offset.
 
 ### 4.3 LiveView Stream Management, Canvas Processing & Auto-Save
 * `LiveViewManager` maintains up to `MAX_MJPEG_CLIENTS = 3` concurrent MJPEG clients in an `ArrayList<MjpegClient>` keyed by client-generated `cid` (per-tab `sessionStorage` ID). Reconnecting with the same `cid` replaces that tab's previous stream immediately; exceeding 3 distinct clients evicts the oldest (`index 0`).

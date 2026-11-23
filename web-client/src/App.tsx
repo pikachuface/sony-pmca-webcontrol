@@ -66,8 +66,8 @@ function applyEventsToState(
       case 'Shutter':
         if (typeof d.status === 'number') next.lastShutterStatus = d.status;
         break;
-      case 'FocusShiftReady':
-        next.focusShiftReady = d.ready === true;
+      case 'FocusShift':
+        next.focusShift = d as unknown as CameraState['focusShift'];
         break;
       case 'StoreImageComplete':
         next.lastStoreImage = d as CameraState['lastStoreImage'];
@@ -537,7 +537,7 @@ export function App() {
               <FocusControl
                 client={client}
                 connected={connected}
-                ready={state?.focusShiftReady === true}
+                focusShift={state?.focusShift}
                 onError={setErrorMsg}
               />
               <AutoSavePanel

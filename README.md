@@ -7,13 +7,16 @@ controlled from any browser on the LAN.
 
 ## What this fork changes
 
-* **Relative focus knob instead of focus drive.** The ILCE-7 firmware ignores
+* **Focus fine-tuning knob instead of focus drive.** The ILCE-7 firmware ignores
   `CameraEx.startOneShotFocusDrive` (`getMaxFocusDriveSpeed()` is `0`, and no `FocusDrive` events
   arrive, with Sony and third-party lenses alike), so upstream's focus slider, stepping buttons and
-  focus stacking never worked on it. `CameraEx.shiftFocusPosition` does work, and the Focus panel is
-  now **[−] knob [+]**: turn it with the scroll wheel, a vertical drag or the arrow keys. Each detent
-  moves focus by **Step size** (default 4), or by 1 while **Shift** is held. The body reports no
-  absolute focus position, so the panel shows the net shift since the last reset.
+  focus stacking never worked on it. The only focus control left is `CameraEx.shiftFocusPosition(n)`,
+  which sets focus to **the last AF position + n**, with n limited to ±16 (measured: repeating
+  `+16` does not move further, `+8` afterwards lands in between). An app therefore cannot sweep
+  the whole focus range on this body, only fine-tune around the AF point. The Focus panel is
+  **[−] knob [+]** with end stops at ±16: click the live view to AF, then turn the knob with the
+  scroll wheel, a vertical drag or the arrow keys. Each detent moves the offset by **Step size**
+  (default 4), or by 1 while **Shift** is held; **Back to AF** returns to offset 0.
 * **Focus stacking and OpenFocus auto-merge removed**, along with the host server's `/local-api/*`.
 * **Magnify tool removed** from the live view; a **full screen** button was added.
 * **Reproducible build in Docker** (`scripts/build.sh`), with a committed debug key so APKs from any
@@ -27,7 +30,7 @@ face detection controls.
 ## Camera support
 
 Developed and tested on the **ILCE-7 with firmware 3.20** (`version.platform` `2.3`). Everything except
-the focus knob is upstream code and should behave as upstream on other PMCA bodies (see
+the focus knob, output crop and preview zoom is upstream code and should behave as upstream on other PMCA bodies (see
 [docs/USER_GUIDE.md](./docs/USER_GUIDE.md)). The focus knob relies on `shiftFocusPosition`, which
 upstream found to block the main thread on the `ILCE-6000`; it is untested on other bodies.
 

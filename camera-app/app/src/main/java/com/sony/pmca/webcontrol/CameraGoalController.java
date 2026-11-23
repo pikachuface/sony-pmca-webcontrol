@@ -173,80 +173,109 @@ public class CameraGoalController {
             }
             return shiftFocus(args.getInt(0), args.length() >= 2 && args.getBoolean(1));
         }
+        if ("setFocusOffset".equals(method)) {
+            if (args == null || args.length() < 1) {
+                throw new IllegalArgumentException("setFocusOffset requires (offset[, skipAfCheck])");
+            }
+            return setFocusOffset(args.getInt(0), args.length() >= 2 && args.getBoolean(1));
+        }
         throw new NoSuchMethodException("Unknown highlevel method: " + method);
     }
 
-    // --- Relative Focus Shift ---
+    // --- Focus Offset From The AF Point ---
 
-    /** Largest |steps| one shiftFocusPosition call accepts when the body does not report it. */
+    /** Largest |offset| when the body does not report getMaxFocusShift(). */
     private static final int DEFAULT_MAX_FOCUS_SHIFT = 16;
     /** A shiftFocusPosition call normally returns in 130-220 ms on the ILCE-7. */
     private static final long FOCUS_SHIFT_TIMEOUT_MS = 2500L;
 
-    /** Set once an autoFocusAt succeeded; see shiftFocus. */
+    /** Set once an autoFocusAt succeeded; see setFocusOffset. */
     private volatile boolean m_afEstablished;
     /** True while a shiftFocusPosition call has not returned (possibly blocked forever). */
     private volatile boolean m_shiftInFlight;
+    /** Current offset from the last AF position, as last passed to shiftFocusPosition. */
+    private int m_focusOffset;
+    private int m_focusOffsetMax = DEFAULT_MAX_FOCUS_SHIFT;
 
     /**
-     * Moves focus by a relative number of steps with CameraEx.shiftFocusPosition, split into
-     * calls no larger than the body's getMaxFocusShift(). Bodies without focus drive (such as
-     * the ILCE-7) support this but report no position, so the result has no absolute focus.
-     *
-     * On the ILCE-7 shiftFocusPosition returned in ~150 ms after an AF, but blocked
-     * indefinitely when called after app start without one (and upstream saw it block the
-     * ILCE-6000). Two guards follow from that: shifts are refused until an autoFocusAt has
-     * succeeded (skipAfCheck bypasses this for diagnosis), and the call runs on its own thread
-     * with a timeout, so a blocked call cannot freeze the main thread and every other control.
+     * Called after every successful autoFocusAt: the lens sits at the new AF position, so the
+     * offset is 0 again. Publishes state "focusShift" and a FocusShift event.
      */
-    /**
-     * Records the first successful autoFocusAt and publishes it as state "focusShiftReady"
-     * plus a FocusShiftReady event, so the web client can unlock the focus knob.
-     */
-    private void markAfEstablished() {
-        if (m_afEstablished) {
-            return;
-        }
+    private void onAutoFocusSucceeded() {
         m_afEstablished = true;
+        int max = queryMaxFocusShift();
+        synchronized (m_focusOpLock) {
+            m_focusOffset = 0;
+            m_focusOffsetMax = max;
+        }
+        publishFocusShift();
+    }
+
+    private void publishFocusShift() {
         try {
+            JSONObject data = focusShiftJson();
             CameraEventHub hub = m_activity.getEventHub();
             if (hub != null) {
-                hub.setState("focusShiftReady", true);
-                JSONObject data = new JSONObject();
-                data.put("ready", true);
-                hub.emit("FocusShiftReady", data);
+                hub.setState("focusShift", data);
+                hub.emit("FocusShift", focusShiftJson());
             }
         } catch (Throwable ignored) {
         }
     }
 
+    private JSONObject focusShiftJson() throws Exception {
+        JSONObject o = new JSONObject();
+        synchronized (m_focusOpLock) {
+            o.put("ready", m_afEstablished);
+            o.put("offset", m_focusOffset);
+            o.put("min", -m_focusOffsetMax);
+            o.put("max", m_focusOffsetMax);
+        }
+        return o;
+    }
+
+    /** Moves the focus offset by {@code steps}, clamped to the body's range; see setFocusOffset. */
     private JSONObject shiftFocus(int steps, boolean skipAfCheck) throws Exception {
+        synchronized (m_focusOpLock) {
+            return setFocusOffset(m_focusOffset + steps, skipAfCheck);
+        }
+    }
+
+    /**
+     * Sets focus to the last AF position plus {@code offset} steps, clamped to
+     * [-getMaxFocusShift(), +getMaxFocusShift()] (±16 on the ILCE-7).
+     *
+     * CameraEx.shiftFocusPosition(n) is not a relative move. Measured on the ILCE-7 with the
+     * FE 50mm F1.8: repeating shiftFocusPosition(16) leaves focus where the first call put it,
+     * and shiftFocusPosition(8) afterwards lands between the AF position and +16. It sets an
+     * offset from the position the last AF reached. Bodies without focus drive (such as the
+     * ILCE-7) therefore cannot sweep the whole focus range from an app, only fine-tune around
+     * the AF point; a new AF on another subject moves the base.
+     *
+     * shiftFocusPosition blocked indefinitely when called after app start without an AF
+     * (upstream saw it block the ILCE-6000 too). So offsets are refused until an autoFocusAt
+     * has succeeded (skipAfCheck bypasses this for diagnosis), and the call runs on its own
+     * thread with a timeout, so a blocked call cannot freeze the main thread.
+     */
+    private JSONObject setFocusOffset(int offset, boolean skipAfCheck) throws Exception {
         if (!m_afEstablished && !skipAfCheck) {
-            throw new IllegalStateException("Focus shift needs an autofocus first: click the live view to AF, then use the knob");
+            throw new IllegalStateException("Focus offset needs an autofocus first: click the live view to AF, then use the knob");
         }
         synchronized (m_focusOpLock) {
-            final int maxChunk = Math.max(1, queryMaxFocusShift());
-            int remaining = steps;
-            int applied = 0;
-            int calls = 0;
+            int max = Math.max(1, m_focusOffsetMax);
+            int target = Math.max(-max, Math.min(max, offset));
             boolean accepted = true;
-            while (remaining != 0) {
-                final int chunk = Math.max(-maxChunk, Math.min(maxChunk, remaining));
-                boolean ok = callShiftFocusPosition(chunk);
-                calls++;
-                if (!ok) {
-                    accepted = false;
-                    break;
+            if (target != m_focusOffset || offset == 0) {
+                accepted = callShiftFocusPosition(target);
+                if (accepted) {
+                    m_focusOffset = target;
                 }
-                applied += chunk;
-                remaining -= chunk;
             }
-            JSONObject obj = new JSONObject();
-            obj.put("requested", steps);
-            obj.put("applied", applied);
+            JSONObject obj = focusShiftJson();
+            obj.put("requested", offset);
             obj.put("accepted", accepted);
-            obj.put("calls", calls);
-            obj.put("maxStepsPerCall", maxChunk);
+            obj.put("atLimit", target != offset);
+            publishFocusShift();
             return obj;
         }
     }
@@ -550,7 +579,7 @@ public class CameraGoalController {
                 pos = m_focus.v1;
             }
             if (afSuccess[0]) {
-                markAfEstablished();
+                onAutoFocusSucceeded();
             }
             JSONObject res = new JSONObject();
             res.put("focused", afSuccess[0]);

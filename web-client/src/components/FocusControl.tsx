@@ -1,65 +1,85 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CameraClient } from '../api/cameraClient';
+import type { CameraClient, FocusShiftState } from '../api/cameraClient';
 
 interface FocusControlProps {
   client: CameraClient;
   connected: boolean;
-  /** The camera accepts focus shifts only after a successful autofocus. */
-  ready: boolean;
+  /** The camera's focus offset; offsets are possible only after a successful autofocus. */
+  focusShift?: FocusShiftState;
   onError: (msg: string) => void;
 }
 
 const STEP_STORAGE_KEY = 'pmca_focus_step';
 const DEFAULT_STEP = 4;
-const MAX_STEP = 64;
+const DEFAULT_RANGE = 16;
 /** Wheel distance (in pixels) that counts as one detent; a mouse notch is about 100px. */
 const WHEEL_PX_PER_TICK = 100;
 const WHEEL_PX_PER_LINE = 33;
 /** Vertical drag distance (in pixels) per detent. */
 const DRAG_PX_PER_TICK = 12;
-/** Knob indicator rotation per detent, purely visual. */
-const DEG_PER_TICK = 18;
+/** Knob travel at either end of the offset range, like a potentiometer. */
+const KNOB_SWEEP_DEG = 135;
 
 function loadStep(): number {
   try {
     const v = Number(localStorage.getItem(STEP_STORAGE_KEY));
-    if (Number.isInteger(v) && v >= 1 && v <= MAX_STEP) return v;
+    if (Number.isInteger(v) && v >= 1 && v <= DEFAULT_RANGE) return v;
   } catch {}
   return DEFAULT_STEP;
 }
 
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
 /**
- * Relative focus control: [-] (knob) [+]. Each detent moves focus by the step size, or by 1
- * while Shift is held. Moves go through `highlevel.shiftFocus`, which works on bodies without
- * focus drive (ILCE-7) but reports no absolute position, so the badge shows the net shift
- * since the last reset rather than a lens position.
+ * Focus fine-tuning around the last AF point: [-] (knob) [+].
+ *
+ * Bodies without focus drive (ILCE-7) only offer CameraEx.shiftFocusPosition, which sets focus
+ * to "AF position + offset" with the offset limited to about ±16. So the knob works like a
+ * potentiometer with end stops: it shows where in that range focus is, each detent moves the
+ * offset by the step size (1 while Shift is held), and a new AF (click the live view) moves
+ * the base and returns the knob to 0.
  */
-export function FocusControl({ client, connected, ready, onError }: FocusControlProps) {
+export function FocusControl({ client, connected, focusShift, onError }: FocusControlProps) {
   const [stepInput, setStepInput] = useState<string>(() => String(loadStep()));
   const [shiftHeld, setShiftHeld] = useState(false);
-  const [netShift, setNetShift] = useState(0);
-  const [ticks, setTicks] = useState(0);
   const [busy, setBusy] = useState(false);
 
-  const knobRef = useRef<HTMLDivElement | null>(null);
-  const pendingRef = useRef(0);
+  const ready = connected && focusShift?.ready === true;
+  const min = focusShift?.min ?? -DEFAULT_RANGE;
+  const max = focusShift?.max ?? DEFAULT_RANGE;
+  const cameraOffset = focusShift?.offset ?? 0;
+
+  // The offset the user dialled in; requests chase it, so fast turning sends only the latest.
+  const [target, setTarget] = useState(cameraOffset);
+  const targetRef = useRef<number>(target);
   const inFlightRef = useRef(false);
+
+  const knobRef = useRef<HTMLDivElement | null>(null);
   const wheelAccumRef = useRef(0);
   const dragRef = useRef<{ pointerId: number; lastY: number; accum: number } | null>(null);
 
   const parsedStep = Number(stepInput);
-  const step = Number.isInteger(parsedStep) && parsedStep >= 1 ? Math.min(parsedStep, MAX_STEP) : DEFAULT_STEP;
-  const stepRef = useRef(step);
-  stepRef.current = step;
-  const enabled = connected && ready;
-  const enabledRef = useRef(enabled);
-  enabledRef.current = enabled;
+  const step = Number.isInteger(parsedStep) && parsedStep >= 1 ? Math.min(parsedStep, max) : DEFAULT_STEP;
+  const live = useRef({ step, ready, min, max, cameraOffset });
+  live.current = { step, ready, min, max, cameraOffset };
 
   useEffect(() => {
     try {
       localStorage.setItem(STEP_STORAGE_KEY, String(step));
     } catch {}
   }, [step]);
+
+  const applyTarget = (v: number) => {
+    targetRef.current = v;
+    setTarget(v);
+  };
+
+  // Follow the camera (a new AF resets the offset to 0) unless a change is being sent.
+  useEffect(() => {
+    if (!inFlightRef.current) applyTarget(cameraOffset);
+  }, [cameraOffset, focusShift?.ready]);
 
   // Shift switches every input to single steps while held.
   useEffect(() => {
@@ -77,24 +97,26 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
     };
   }, []);
 
-  // Coalesce detents: one request in flight, everything turned meanwhile goes in the next one.
+  // One request in flight; whatever is dialled meanwhile goes out next.
   const flush = useCallback(async () => {
     if (inFlightRef.current) return;
     inFlightRef.current = true;
     setBusy(true);
     try {
-      while (pendingRef.current !== 0) {
-        const steps = pendingRef.current;
-        pendingRef.current = 0;
-        const res = await client.shiftFocus(steps);
-        setNetShift((n) => n + res.applied);
+      let sent: number | null = null;
+      while (sent !== targetRef.current) {
+        const want: number = targetRef.current;
+        const res = await client.setFocusOffset(want);
+        sent = want;
         if (!res.accepted) {
-          pendingRef.current = 0;
-          onError('Camera rejected the focus shift (end of focus range?)');
+          applyTarget(res.offset);
+          onError('Camera rejected the focus offset');
+          break;
         }
+        if (targetRef.current === want) applyTarget(res.offset);
       }
     } catch (err) {
-      pendingRef.current = 0;
+      applyTarget(live.current.cameraOffset);
       onError(err instanceof Error ? err.message : String(err));
     } finally {
       inFlightRef.current = false;
@@ -102,15 +124,25 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
     }
   }, [client, onError]);
 
-  const turn = useCallback(
-    (detents: number, single: boolean) => {
-      if (!enabledRef.current || detents === 0) return;
-      const perDetent = single ? 1 : stepRef.current;
-      pendingRef.current += detents * perDetent;
-      setTicks((t) => t + detents);
+  const setOffset = useCallback(
+    (value: number) => {
+      const { ready: ok, min: lo, max: hi } = live.current;
+      if (!ok) return;
+      const next = clamp(value, lo, hi);
+      if (next === targetRef.current) return;
+      applyTarget(next);
       void flush();
     },
     [flush],
+  );
+
+  const turn = useCallback(
+    (detents: number, single: boolean) => {
+      if (detents === 0) return;
+      const perDetent = single ? 1 : live.current.step;
+      setOffset(targetRef.current + detents * perDetent);
+    },
+    [setOffset],
   );
 
   // Native wheel listener: React's onWheel is passive and cannot stop the page from scrolling.
@@ -134,7 +166,7 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
   }, [turn]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!enabled || e.button !== 0) return;
+    if (!ready || e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = { pointerId: e.pointerId, lastY: e.clientY, accum: 0 };
   };
@@ -162,45 +194,47 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
     } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
       e.preventDefault();
       turn(-1, e.shiftKey);
+    } else if (e.key === 'Home' || e.key === '0') {
+      e.preventDefault();
+      setOffset(0);
     }
   };
 
   const effectiveStep = shiftHeld ? 1 : step;
-  const sign = netShift > 0 ? '+' : '';
+  const offsetLabel = target === 0 ? '±0' : target > 0 ? `+${target}` : String(target);
+  const knobDeg = (target / Math.max(1, max)) * KNOB_SWEEP_DEG;
+  const markerPct = ((target - min) / Math.max(1, max - min)) * 100;
 
   return (
     <section className="panel">
       <div className="panel-header">
         <div className="panel-title">
           <span>Focus</span>
-          <span className="badge" title="Net focus shift since the last reset (this body reports no absolute position)">
-            Δ {sign}
-            {netShift}
+          <span className="badge" title="Focus offset from the last autofocus position">
+            AF {offsetLabel}
           </span>
           {busy && <span className="muted-tag">moving…</span>}
         </div>
         <button
           type="button"
           className="btn btn-sm"
-          onClick={() => {
-            setNetShift(0);
-            setTicks(0);
-          }}
-          title="Reset the shift counter (does not move focus)"
+          disabled={!ready || target === 0}
+          onClick={() => setOffset(0)}
+          title="Return focus to where the last autofocus put it"
         >
-          Reset Δ
+          Back to AF
         </button>
       </div>
 
       {connected && !ready && (
-        <p className="focus-lock-hint">Click the live view to autofocus first. The knob unlocks after a successful AF.</p>
+        <p className="focus-lock-hint">Click the live view to autofocus first. The knob fine-tunes focus around that point.</p>
       )}
 
       <div className="focus-knob-row">
         <button
           type="button"
           className="btn focus-knob-btn"
-          disabled={!enabled}
+          disabled={!ready || target <= min}
           onClick={(e) => turn(-1, e.shiftKey)}
           title={`Focus −${effectiveStep}`}
           aria-label={`Focus minus ${effectiveStep}`}
@@ -209,27 +243,29 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
         </button>
         <div
           ref={knobRef}
-          className={`focus-knob ${!enabled ? 'is-disabled' : ''}`}
-          role="spinbutton"
-          aria-label="Focus knob: scroll, drag up or down, or use arrow keys"
-          aria-valuenow={netShift}
-          aria-disabled={!enabled}
-          tabIndex={enabled ? 0 : -1}
-          title="Scroll or drag to turn focus. Hold Shift for single steps."
+          className={`focus-knob ${!ready ? 'is-disabled' : ''}`}
+          role="slider"
+          aria-label="Focus offset from the AF point: scroll, drag up or down, or use arrow keys"
+          aria-valuemin={min}
+          aria-valuemax={max}
+          aria-valuenow={target}
+          aria-disabled={!ready}
+          tabIndex={ready ? 0 : -1}
+          title="Scroll or drag to fine-tune focus around the AF point. Hold Shift for single steps."
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={endDrag}
           onPointerCancel={endDrag}
           onKeyDown={onKnobKeyDown}
         >
-          <div className="focus-knob-dial" style={{ transform: `rotate(${ticks * DEG_PER_TICK}deg)` }}>
+          <div className="focus-knob-dial" style={{ transform: `rotate(${knobDeg}deg)` }}>
             <span className="focus-knob-indicator" />
           </div>
         </div>
         <button
           type="button"
           className="btn focus-knob-btn"
-          disabled={!enabled}
+          disabled={!ready || target >= max}
           onClick={(e) => turn(1, e.shiftKey)}
           title={`Focus +${effectiveStep}`}
           aria-label={`Focus plus ${effectiveStep}`}
@@ -238,18 +274,30 @@ export function FocusControl({ client, connected, ready, onError }: FocusControl
         </button>
       </div>
 
+      <div className={`focus-range ${!ready ? 'is-disabled' : ''}`} aria-hidden="true">
+        <div className="focus-range-track">
+          <span className="focus-range-center" />
+          <span className="focus-range-marker" style={{ left: `${markerPct}%` }} />
+        </div>
+        <div className="focus-range-labels">
+          <span>{min}</span>
+          <span>AF</span>
+          <span>+{max}</span>
+        </div>
+      </div>
+
       <div className="focus-step-row">
         <label htmlFor="focus-step-input">Step size</label>
         <input
           id="focus-step-input"
           type="number"
           min={1}
-          max={MAX_STEP}
+          max={max}
           className="input-sm"
           value={stepInput}
           onChange={(e) => setStepInput(e.target.value)}
           onBlur={() => setStepInput(String(step))}
-          title={`Focus steps per detent (1–${MAX_STEP})`}
+          title={`Focus steps per detent (1–${max})`}
         />
         <span className={`muted-tag ${shiftHeld ? 'focus-shift-active' : ''}`}>
           {shiftHeld ? 'Shift: 1 step' : 'Hold Shift for 1 step'}

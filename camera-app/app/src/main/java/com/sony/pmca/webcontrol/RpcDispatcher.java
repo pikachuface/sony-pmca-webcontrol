@@ -189,6 +189,7 @@ public class RpcDispatcher {
                 addSyntheticMethod(arr, queryFilter, "setShutterSpeed", new String[]{"int", "int"}, "JSONObject");
                 addSyntheticMethod(arr, queryFilter, "setZoomPosition", new String[]{"int", "int"}, "JSONObject");
                 addSyntheticMethod(arr, queryFilter, "shiftFocus", new String[]{"int"}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "setFocusOffset", new String[]{"int"}, "JSONObject");
                 targets.put("highlevel", arr);
             }
 
