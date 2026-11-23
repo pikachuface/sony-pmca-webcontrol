@@ -4,6 +4,8 @@ import type { CameraClient } from '../api/cameraClient';
 interface FocusControlProps {
   client: CameraClient;
   connected: boolean;
+  /** The camera accepts focus shifts only after a successful autofocus. */
+  ready: boolean;
   onError: (msg: string) => void;
 }
 
@@ -32,7 +34,7 @@ function loadStep(): number {
  * focus drive (ILCE-7) but reports no absolute position, so the badge shows the net shift
  * since the last reset rather than a lens position.
  */
-export function FocusControl({ client, connected, onError }: FocusControlProps) {
+export function FocusControl({ client, connected, ready, onError }: FocusControlProps) {
   const [stepInput, setStepInput] = useState<string>(() => String(loadStep()));
   const [shiftHeld, setShiftHeld] = useState(false);
   const [netShift, setNetShift] = useState(0);
@@ -49,8 +51,9 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
   const step = Number.isInteger(parsedStep) && parsedStep >= 1 ? Math.min(parsedStep, MAX_STEP) : DEFAULT_STEP;
   const stepRef = useRef(step);
   stepRef.current = step;
-  const connectedRef = useRef(connected);
-  connectedRef.current = connected;
+  const enabled = connected && ready;
+  const enabledRef = useRef(enabled);
+  enabledRef.current = enabled;
 
   useEffect(() => {
     try {
@@ -101,7 +104,7 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
 
   const turn = useCallback(
     (detents: number, single: boolean) => {
-      if (!connectedRef.current || detents === 0) return;
+      if (!enabledRef.current || detents === 0) return;
       const perDetent = single ? 1 : stepRef.current;
       pendingRef.current += detents * perDetent;
       setTicks((t) => t + detents);
@@ -131,7 +134,7 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
   }, [turn]);
 
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!connected || e.button !== 0) return;
+    if (!enabled || e.button !== 0) return;
     e.currentTarget.setPointerCapture(e.pointerId);
     dragRef.current = { pointerId: e.pointerId, lastY: e.clientY, accum: 0 };
   };
@@ -189,11 +192,15 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
         </button>
       </div>
 
+      {connected && !ready && (
+        <p className="focus-lock-hint">Click the live view to autofocus first. The knob unlocks after a successful AF.</p>
+      )}
+
       <div className="focus-knob-row">
         <button
           type="button"
           className="btn focus-knob-btn"
-          disabled={!connected}
+          disabled={!enabled}
           onClick={(e) => turn(-1, e.shiftKey)}
           title={`Focus −${effectiveStep}`}
           aria-label={`Focus minus ${effectiveStep}`}
@@ -202,12 +209,12 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
         </button>
         <div
           ref={knobRef}
-          className={`focus-knob ${!connected ? 'is-disabled' : ''}`}
+          className={`focus-knob ${!enabled ? 'is-disabled' : ''}`}
           role="spinbutton"
           aria-label="Focus knob: scroll, drag up or down, or use arrow keys"
           aria-valuenow={netShift}
-          aria-disabled={!connected}
-          tabIndex={connected ? 0 : -1}
+          aria-disabled={!enabled}
+          tabIndex={enabled ? 0 : -1}
           title="Scroll or drag to turn focus. Hold Shift for single steps."
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
@@ -222,7 +229,7 @@ export function FocusControl({ client, connected, onError }: FocusControlProps) 
         <button
           type="button"
           className="btn focus-knob-btn"
-          disabled={!connected}
+          disabled={!enabled}
           onClick={(e) => turn(1, e.shiftKey)}
           title={`Focus +${effectiveStep}`}
           aria-label={`Focus plus ${effectiveStep}`}

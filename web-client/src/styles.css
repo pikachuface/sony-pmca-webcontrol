@@ -929,6 +929,13 @@ body {
   background: var(--accent);
 }
 
+.focus-lock-hint {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  text-align: center;
+  color: var(--muted);
+}
+
 .focus-step-row {
   display: flex;
   align-items: center;

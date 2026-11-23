@@ -32,6 +32,7 @@ public class CameraEventHub {
             m_state.put("lastStoreImage", new JSONObject());
             m_state.put("lastShutterStatus", -1);
             m_state.put("capturing", false);
+            m_state.put("focusShiftReady", false);
             m_state.put("lens", new JSONObject());
             m_state.put("exposureCompensation", new JSONObject());
             setWifiInfo("0.0.0.0", MacroHttpServer.DEFAULT_PORT);

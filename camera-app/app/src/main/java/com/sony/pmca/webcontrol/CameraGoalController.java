@@ -199,6 +199,27 @@ public class CameraGoalController {
      * succeeded (skipAfCheck bypasses this for diagnosis), and the call runs on its own thread
      * with a timeout, so a blocked call cannot freeze the main thread and every other control.
      */
+    /**
+     * Records the first successful autoFocusAt and publishes it as state "focusShiftReady"
+     * plus a FocusShiftReady event, so the web client can unlock the focus knob.
+     */
+    private void markAfEstablished() {
+        if (m_afEstablished) {
+            return;
+        }
+        m_afEstablished = true;
+        try {
+            CameraEventHub hub = m_activity.getEventHub();
+            if (hub != null) {
+                hub.setState("focusShiftReady", true);
+                JSONObject data = new JSONObject();
+                data.put("ready", true);
+                hub.emit("FocusShiftReady", data);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private JSONObject shiftFocus(int steps, boolean skipAfCheck) throws Exception {
         if (!m_afEstablished && !skipAfCheck) {
             throw new IllegalStateException("Focus shift needs an autofocus first: click the live view to AF, then use the knob");
@@ -529,7 +550,7 @@ public class CameraGoalController {
                 pos = m_focus.v1;
             }
             if (afSuccess[0]) {
-                m_afEstablished = true;
+                markAfEstablished();
             }
             JSONObject res = new JSONObject();
             res.put("focused", afSuccess[0]);

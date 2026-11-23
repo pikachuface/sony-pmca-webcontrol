@@ -55,6 +55,8 @@ export interface CameraState {
   };
   lastShutterStatus?: number;
   capturing?: boolean;
+  /** True once an autofocus succeeded; the camera refuses focus shifts before that. */
+  focusShiftReady?: boolean;
   lens?: {
     LensName?: string;
     LensType?: string;
