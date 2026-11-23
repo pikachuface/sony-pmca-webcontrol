@@ -31,6 +31,16 @@ sony-pmca-webcontrol/
 * **JDK 8** (Android Gradle plugin `2.1.x` fails on JDK 9+)
 * **Android SDK** with Platform 10 (`android-2.3.3`) and Build Tools `25.0.2`
 
+### Docker Build (no local toolchain)
+`scripts/build.sh` builds the APK and `web-client/dist/index.html` inside the pinned image from
+`docker/Dockerfile` (JDK 8, Android platform 10, build-tools 25.0.2, Node.js 22; every download
+is checksum-verified). Only Docker is needed on the host; Gradle and npm caches live in the
+`sony-pmca-webcontrol-cache` volume. `scripts/build.sh shell` opens a shell in the container.
+On SELinux hosts the checkout is bind-mounted with `:z` (undo with `restorecon -R <checkout>`).
+
+Debug builds are signed with the committed `camera-app/debug.keystore`, so every machine and CI
+run produces APKs the camera accepts as updates of each other. The key protects nothing.
+
 ### Build Command
 `camera-app/app/src/main/assets/index.html.gzip` is a generated build artifact (gitignored). Gradle's `buildCameraWebUi` task automatically runs `npm run build:camera` (and `npm ci` if `node_modules` is missing) whenever `web-client/` changes or the asset is missing:
 ```bash
