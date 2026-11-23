@@ -164,7 +164,75 @@ public class CameraGoalController {
             int tol = args.length() >= 2 ? args.getInt(1) : 1;
             return setZoomPosition(target, Math.max(0, tol));
         }
+        if ("shiftFocus".equals(method)) {
+            if (args == null || args.length() < 1) {
+                throw new IllegalArgumentException("shiftFocus requires (steps)");
+            }
+            return shiftFocus(args.getInt(0));
+        }
         throw new NoSuchMethodException("Unknown highlevel method: " + method);
+    }
+
+    // --- Relative Focus Shift ---
+
+    /** Largest |steps| one shiftFocusPosition call accepts when the body does not report it. */
+    private static final int DEFAULT_MAX_FOCUS_SHIFT = 16;
+
+    /**
+     * Moves focus by a relative number of steps with CameraEx.shiftFocusPosition, split into
+     * calls no larger than the body's getMaxFocusShift(). Bodies without focus drive (such as
+     * the ILCE-7) support this but report no position, so the result has no absolute focus.
+     */
+    private JSONObject shiftFocus(int steps) throws Exception {
+        synchronized (m_focusOpLock) {
+            final int maxChunk = Math.max(1, queryMaxFocusShift());
+            int remaining = steps;
+            int applied = 0;
+            int calls = 0;
+            boolean accepted = true;
+            while (remaining != 0) {
+                final int chunk = Math.max(-maxChunk, Math.min(maxChunk, remaining));
+                Boolean ok = m_activity.runOnMainSync(new Callable<Boolean>() {
+                    @Override
+                    public Boolean call() {
+                        CameraEx cam = m_activity.getCameraEx();
+                        return cam != null && cam.shiftFocusPosition(chunk);
+                    }
+                }, MacroServerActivity.MAIN_THREAD_TIMEOUT_MS);
+                calls++;
+                if (ok == null || !ok) {
+                    accepted = false;
+                    break;
+                }
+                applied += chunk;
+                remaining -= chunk;
+            }
+            JSONObject obj = new JSONObject();
+            obj.put("requested", steps);
+            obj.put("applied", applied);
+            obj.put("accepted", accepted);
+            obj.put("calls", calls);
+            obj.put("maxStepsPerCall", maxChunk);
+            return obj;
+        }
+    }
+
+    private int queryMaxFocusShift() {
+        try {
+            Integer max = m_activity.runOnMainSync(new Callable<Integer>() {
+                @Override
+                public Integer call() {
+                    CameraEx cam = m_activity.getCameraEx();
+                    if (cam == null) return DEFAULT_MAX_FOCUS_SHIFT;
+                    CameraEx.ParametersModifier mod =
+                            cam.createParametersModifier(cam.getNormalCamera().getParameters());
+                    return mod.isSupportedFocusShift() ? mod.getMaxFocusShift() : DEFAULT_MAX_FOCUS_SHIFT;
+                }
+            }, MacroServerActivity.MAIN_THREAD_TIMEOUT_MS);
+            return max != null && max > 0 ? max : DEFAULT_MAX_FOCUS_SHIFT;
+        } catch (Throwable t) {
+            return DEFAULT_MAX_FOCUS_SHIFT;
+        }
     }
 
     // --- Closed-Loop Implementations ---

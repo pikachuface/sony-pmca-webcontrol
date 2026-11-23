@@ -125,14 +125,12 @@ export interface AutoFocusResult {
   position?: number;
 }
 
-export interface SetFocusResult {
-  converged: boolean;
-  superseded: boolean;
-  stalled: boolean;
-  position: number;
-  target: number;
-  steps: number;
-  manualOverride?: boolean;
+export interface ShiftFocusResult {
+  requested: number;
+  applied: number;
+  accepted: boolean;
+  calls: number;
+  maxStepsPerCall: number;
 }
 
 const STORAGE_KEY = 'pmca_camera_base_url';
@@ -409,100 +407,12 @@ export class CameraClient {
   }
 
   /**
-   * Device-side closed-loop focus positioning via `highlevel.setFocusPosition`.
+   * Relative focus move via `highlevel.shiftFocus` (CameraEx.shiftFocusPosition). Works on
+   * bodies without focus drive, such as the ILCE-7, but reports no absolute position.
    */
-  async gotoFocus(
-    targetPos: number,
-    tolerance = 0,
-    signal?: AbortSignal,
-  ): Promise<number> {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-    const res = await this.call<SetFocusResult>(
-      'highlevel',
-      'setFocusPosition',
-      [targetPos, tolerance],
-      signal,
-    );
-    if (signal?.aborted) {
-      throw new DOMException('Aborted', 'AbortError');
-    }
-    if (res.manualOverride) {
-      throw new Error('Manual focus override detected');
-    }
-    if (res.superseded) {
-      throw new DOMException('Superseded', 'AbortError');
-    }
-    if (!res.converged || Math.abs(res.position - res.target) > tolerance) {
-      throw new Error(
-        `Focus failed to reach ${res.target} (stopped at ${res.position}${res.stalled ? ', stalled' : ''})`,
-      );
-    }
-    return res.position;
+  shiftFocus(steps: number, signal?: AbortSignal): Promise<ShiftFocusResult> {
+    return this.call<ShiftFocusResult>('highlevel', 'shiftFocus', [Math.round(steps)], signal);
   }
-
-  async runFocusStack(
-    startPos: number,
-    endPos: number,
-    stepSize: number,
-    settleMs: number,
-    onProgress: (info: { index: number; total: number; targetPos: number; actualPos: number }) => void,
-    signal?: AbortSignal,
-    onTarget?: (targetPos: number) => void,
-    onCaptureShot?: (triggerShot: () => Promise<unknown>, signal?: AbortSignal) => Promise<void>,
-  ): Promise<void> {
-    const positions = computeFocusStackPositions(startPos, endPos, stepSize);
-    for (let i = 0; i < positions.length; i++) {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      const target = positions[i];
-      onTarget?.(target);
-      const actual = await this.gotoFocus(target, 0, signal);
-      onProgress({ index: i + 1, total: positions.length, targetPos: target, actualPos: actual });
-      await waitAbortable(settleMs, signal);
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (onCaptureShot) {
-        await onCaptureShot(() => this.takePicture(), signal);
-      } else {
-        await this.takePicture();
-        await waitAbortable(900, signal);
-      }
-    }
-  }
-}
-
-function waitAbortable(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) {
-    return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  }
-  if (ms <= 0) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject(new DOMException('Aborted', 'AbortError'));
-    };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', onAbort);
-      resolve();
-    }, ms);
-    signal?.addEventListener('abort', onAbort, { once: true });
-  });
-}
-
-export function computeFocusStackPositions(
-  startPos: number,
-  endPos: number,
-  stepSize: number,
-): number[] {
-  const start = Math.round(startPos);
-  const end = Math.round(endPos);
-  const step = Math.max(1, Math.round(stepSize));
-  if (start === end) return [start];
-  const dir = end > start ? 1 : -1;
-  const positions: number[] = [];
-  for (let pos = start; dir > 0 ? pos < end : pos > end; pos += dir * step) {
-    positions.push(pos);
-  }
-  positions.push(end);
-  return positions;
 }
 
 export function formatAperture(raw?: number): string {

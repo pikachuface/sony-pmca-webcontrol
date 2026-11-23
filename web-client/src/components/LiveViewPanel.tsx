@@ -1,12 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CameraClient, CameraState } from '../api/cameraClient';
+import type { CameraClient } from '../api/cameraClient';
 
 interface LiveViewPanelProps {
   client: CameraClient;
   connected: boolean;
   onCapture: () => void;
   capturing: boolean;
-  previewMagnification?: CameraState['previewMagnification'];
   onError?: (msg: string | null) => void;
 }
 
@@ -27,7 +26,6 @@ export function LiveViewPanel({
   connected,
   onCapture,
   capturing,
-  previewMagnification,
   onError,
 }: LiveViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -40,19 +38,8 @@ export function LiveViewPanel({
   const [showGrid, setShowGrid] = useState(true);
   const [peaking, setPeaking] = useState(false);
   const [showHistogram, setShowHistogram] = useState(false);
-  const [toolMode, setToolMode] = useState<'focus' | 'magnify'>('focus');
   const [afStatus, setAfStatus] = useState<'idle' | 'focusing' | 'ok' | 'fail'>('idle');
   const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
-  const [autoResetSec, setAutoResetSec] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('pmca_mag_auto_reset_sec');
-      if (saved !== null) {
-        const n = Number(saved);
-        if (Number.isFinite(n) && n >= 0) return n;
-      }
-    } catch {}
-    return 0;
-  });
   const [rotationDeg, setRotationDeg] = useState<0 | 90 | 180 | 270>(() => {
     try {
       const saved = Number(localStorage.getItem('pmca_lv_rotation'));
@@ -65,33 +52,13 @@ export function LiveViewPanel({
   const [frameError, setFrameError] = useState<string | null>(null);
   const [lvMode, setLvMode] = useState<'mjpeg' | 'jpg'>('mjpeg');
 
-  const magEnabled = Boolean(previewMagnification?.enabled);
-  const magRatio = previewMagnification?.ratio ?? 100;
-  const magLabel = !magEnabled ? '1x' : magRatio >= 900 ? '11.7x' : '5.9x';
-
   const focusPointRef = useRef<{ x: number; y: number } | null>(null);
   focusPointRef.current = focusPoint;
   const afStatusRef = useRef<'idle' | 'focusing' | 'ok' | 'fail'>('idle');
   afStatusRef.current = afStatus;
   const liveViewCidRef = useRef<string>(getLiveViewClientId());
   const afTimerRef = useRef<number | null>(null);
-  const magResetTimerRef = useRef<number | null>(null);
-
-  const clearMagResetTimer = () => {
-    if (magResetTimerRef.current !== null) {
-      window.clearTimeout(magResetTimerRef.current);
-      magResetTimerRef.current = null;
-    }
-  };
-
-  const scheduleMagReset = (delaySec: number) => {
-    clearMagResetTimer();
-    if (delaySec <= 0) return;
-    magResetTimerRef.current = window.setTimeout(() => {
-      magResetTimerRef.current = null;
-      void client.stopPreviewMagnification().catch(() => {});
-    }, delaySec * 1000);
-  };
+  const stageRef = useRef<HTMLDivElement | null>(null);
 
   const clearAfTimer = () => {
     if (afTimerRef.current !== null) {
@@ -114,19 +81,25 @@ export function LiveViewPanel({
       if (afTimerRef.current !== null) {
         window.clearTimeout(afTimerRef.current);
       }
-      if (magResetTimerRef.current !== null) {
-        window.clearTimeout(magResetTimerRef.current);
-      }
     };
   }, []);
 
+  const [isFullscreen, setIsFullscreen] = useState(false);
   useEffect(() => {
-    if (!magEnabled) {
-      clearMagResetTimer();
-      return;
+    const onChange = () => setIsFullscreen(document.fullscreenElement === stageRef.current);
+    document.addEventListener('fullscreenchange', onChange);
+    return () => document.removeEventListener('fullscreenchange', onChange);
+  }, []);
+
+  const toggleFullscreen = () => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    } else {
+      void stageRef.current?.requestFullscreen().catch((err) => {
+        onError?.(err instanceof Error ? err.message : String(err));
+      });
     }
-    scheduleMagReset(autoResetSec);
-  }, [magEnabled, autoResetSec]);
+  };
   // Keep overlay flags in refs so toggling them doesn't reconnect the MJPEG stream
   const showGridRef = useRef(showGrid);
   showGridRef.current = showGrid;
@@ -433,35 +406,18 @@ export function LiveViewPanel({
       normY = dispX;
     }
 
-    if (toolMode === 'focus') {
-      clearAfTimer();
-      setFocusPoint({ x: clickX, y: clickY });
-      setAfStatus('focusing');
-      try {
-        const res = await client.autoFocusAt(normX, normY);
-        if (!res.superseded) {
-          setAfStatus(res.focused ? 'ok' : 'fail');
-          scheduleAfDismiss(2000);
-        }
-      } catch (err) {
-        setAfStatus('fail');
-        scheduleAfDismiss(2000);
-        onError?.(err instanceof Error ? err.message : String(err));
-      }
-      return;
-    }
-
-    // Magnify tool: map normalized click to Sony [-1000..1000], accounting for current magnification viewport
-    const factor = magEnabled && magRatio > 100 ? magRatio / 100 : 1;
-    const curX = magEnabled ? (previewMagnification?.pos?.[0] ?? 0) : 0;
-    const curY = magEnabled ? (previewMagnification?.pos?.[1] ?? 0) : 0;
-    const sx = Math.max(-1000, Math.min(1000, Math.round(curX + (normX - 0.5) * (2000 / factor))));
-    const sy = Math.max(-1000, Math.min(1000, Math.round(curY + (normY - 0.5) * (2000 / factor))));
-    const nextFactor: 100 | 200 = !magEnabled ? 100 : 200;
+    clearAfTimer();
+    setFocusPoint({ x: clickX, y: clickY });
+    setAfStatus('focusing');
     try {
-      await client.setPreviewMagnification(nextFactor, sx, sy);
-      scheduleMagReset(autoResetSec);
+      const res = await client.autoFocusAt(normX, normY);
+      if (!res.superseded) {
+        setAfStatus(res.focused ? 'ok' : 'fail');
+        scheduleAfDismiss(2000);
+      }
     } catch (err) {
+      setAfStatus('fail');
+      scheduleAfDismiss(2000);
       onError?.(err instanceof Error ? err.message : String(err));
     }
   };
@@ -589,20 +545,25 @@ export function LiveViewPanel({
           >
             ↻
           </button>
+          <button
+            type="button"
+            className={`btn btn-sm ${isFullscreen ? 'btn-active' : ''}`}
+            onClick={toggleFullscreen}
+            title={isFullscreen ? 'Exit full screen (Esc)' : 'Full screen'}
+            aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'}
+          >
+            ⛶
+          </button>
         </div>
       </div>
 
-      <div className="liveview-stage">
+      <div className="liveview-stage" ref={stageRef}>
         <canvas
           ref={canvasRef}
           className="liveview-canvas"
           style={{ cursor: 'crosshair' }}
           onClick={(e) => void handleCanvasClick(e)}
-          title={
-            toolMode === 'focus'
-              ? 'Click image to autofocus here'
-              : 'Click image to magnify here'
-          }
+          title="Click image to autofocus here"
         />
         {showHistogram && connected && streaming && !frameError && (
           <canvas
@@ -617,6 +578,17 @@ export function LiveViewPanel({
             {!connected ? 'Not connected to camera' : frameError}
           </div>
         )}
+        {isFullscreen && (
+          <button
+            type="button"
+            className="btn btn-sm fullscreen-exit"
+            onClick={toggleFullscreen}
+            title="Exit full screen (Esc)"
+            aria-label="Exit full screen"
+          >
+            ✕
+          </button>
+        )}
         <button
           type="button"
           className="shutter-fab"
@@ -630,65 +602,8 @@ export function LiveViewPanel({
       </div>
 
       <div className="toolbar-row" style={{ marginTop: 8, justifyContent: 'space-between', alignItems: 'center' }}>
-        <div className="toolbar-row">
-          <button
-            type="button"
-            className={`btn btn-sm ${toolMode === 'focus' ? 'btn-active' : ''}`}
-            disabled={!connected}
-            onClick={() => {
-              setToolMode('focus');
-              if (magEnabled) {
-                void client.stopPreviewMagnification().catch(() => {});
-              }
-            }}
-            title="Click image to autofocus & lock focus"
-          >
-            🎯 Focus
-          </button>
-          <button
-            type="button"
-            className={`btn btn-sm ${toolMode === 'magnify' ? 'btn-active' : ''}`}
-            disabled={!connected}
-            onClick={() => setToolMode('magnify')}
-            title="Click image to magnify (5.9x / 11.7x)"
-          >
-            🔍 Magnify
-          </button>
-          <button
-            type="button"
-            className="btn btn-sm"
-            disabled={!connected || !magEnabled}
-            onClick={() => {
-              clearMagResetTimer();
-              void client.stopPreviewMagnification().catch((err) => {
-                onError?.(err instanceof Error ? err.message : String(err));
-              });
-            }}
-            title="Reset magnification to 1x"
-          >
-            ↩ Reset
-          </button>
-          <select
-            className="btn btn-sm"
-            value={autoResetSec}
-            onChange={(e) => {
-              const sec = Number(e.target.value);
-              setAutoResetSec(sec);
-              try {
-                localStorage.setItem('pmca_mag_auto_reset_sec', String(sec));
-              } catch {}
-            }}
-            title="Auto-reset magnification to 1x after N seconds"
-            aria-label="Auto-reset magnification delay"
-          >
-            <option value={0}>Auto-Reset: Off</option>
-            <option value={3}>Reset in 3s</option>
-            <option value={5}>Reset in 5s</option>
-            <option value={10}>Reset in 10s</option>
-          </select>
-        </div>
+        <span className="muted-tag">Click the image to autofocus there</span>
         <div className="toolbar-row" style={{ gap: 6 }}>
-          <span className="badge">{magLabel}</span>
           {afStatus !== 'idle' && (
             <span className="badge">
               {afStatus === 'focusing' ? 'AF...' : afStatus === 'ok' ? 'AF OK' : 'AF Fail'}

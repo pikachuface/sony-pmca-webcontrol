@@ -12,16 +12,6 @@ import {
   saveBlobToDirectory,
   triggerBrowserDownload,
 } from './api/localSave';
-import {
-  backendStackResultUrl,
-  createBackendStackSession,
-  deleteBackendStackSession,
-  fetchHostCapabilities,
-  getBackendStackStatus,
-  grabLatestToBackendStack,
-  type HostCapabilities,
-  triggerBackendStackMerge,
-} from './api/hostBackend';
 import { AutoSavePanel } from './components/AutoSavePanel';
 import { EventsPanel, type LoggedCameraEvent } from './components/EventsPanel';
 import { ExposureControl } from './components/ExposureControl';
@@ -124,21 +114,6 @@ export function App() {
   const [savedCount, setSavedCount] = useState<number>(0);
   const [lastSavedFile, setLastSavedFile] = useState<string | null>(null);
   const [savingStatus, setSavingStatus] = useState<string | null>(null);
-  const [hostCaps, setHostCaps] = useState<HostCapabilities>({
-    backend: false,
-    openfocus: {
-      available: false,
-      reason: 'Checking host backend...',
-    },
-  });
-  const [autoMerge, setAutoMerge] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('pmca_automerge_enabled') === 'true';
-    } catch {
-      return false;
-    }
-  });
-  const [mergeStatus, setMergeStatus] = useState<string | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
 
   const seqRef = useRef<number>(0);
@@ -159,10 +134,6 @@ export function App() {
     };
   }, []);
 
-  useEffect(() => {
-    if (__CAMERA_EMBEDDED__) return;
-    void fetchHostCapabilities().then(setHostCaps);
-  }, []);
   const autoSaveRef = useRef<boolean>(false);
   autoSaveRef.current = autoSaveEnabled;
 
@@ -189,9 +160,8 @@ export function App() {
   }, [client]);
 
   const handledFilesRef = useRef<Set<string>>(new Set());
-  const stackSessionRef = useRef<{ baseName: string; nextIndex: number } | null>(null);
-  const backendMergeSessionRef = useRef<{ sessionId: string; pendingGrabs: Set<Promise<void>> } | null>(null);
-  const stackShotWaitersRef = useRef<Array<() => void>>([]);
+  // Names a series of captures (e.g. a timelapse) base_0001.jpg, base_0002.jpg, ...
+  const captureSeriesRef = useRef<{ baseName: string; nextIndex: number; digits: number } | null>(null);
   const saveQueueRef = useRef<Array<{ name: string; url: string; resolve?: () => void }>>([]);
   const isProcessingQueueRef = useRef<boolean>(false);
 
@@ -259,10 +229,10 @@ export function App() {
   }, []);
 
   const nextCaptureFileName = useCallback(() => {
-    const stack = stackSessionRef.current;
-    if (stack) {
-      stack.nextIndex += 1;
-      return `${stack.baseName}_${String(stack.nextIndex).padStart(3, '0')}.jpg`;
+    const series = captureSeriesRef.current;
+    if (series) {
+      series.nextIndex += 1;
+      return `${series.baseName}_${String(series.nextIndex).padStart(series.digits, '0')}.jpg`;
     }
     const d = new Date();
     const pad = (n: number) => String(n).padStart(2, '0');
@@ -280,201 +250,16 @@ export function App() {
       }
       handledFilesRef.current.add(dedupKey);
 
-      const waiter = stackShotWaitersRef.current.shift();
-
-      const mergeSession = __CAMERA_EMBEDDED__ ? null : backendMergeSessionRef.current;
-      if (mergeSession) {
-        const grabTask = grabLatestToBackendStack(mergeSession.sessionId, activeUrlRef.current)
-          .then(() => undefined)
-          .catch((err) => {
-            setErrorMsg(err instanceof Error ? err.message : String(err));
-          });
-        mergeSession.pendingGrabs.add(grabTask);
-        void grabTask.finally(() => {
-          mergeSession.pendingGrabs.delete(grabTask);
-          waiter?.();
-        });
-        return;
-      }
-
       if (!autoSaveRef.current) {
-        waiter?.();
         return;
       }
 
-      const saveTask = queueSavePhoto({
+      void queueSavePhoto({
         name: nextCaptureFileName(),
         url: client.latestPhotoUrl(Date.now()),
       });
-      if (waiter) {
-        void saveTask.finally(() => {
-          waiter();
-        });
-      }
     },
     [client, nextCaptureFileName, queueSavePhoto],
-  );
-
-  const captureStackShot = useCallback(
-    async (triggerShot: () => Promise<unknown>, signal?: AbortSignal) => {
-      if (signal?.aborted) {
-        throw new DOMException('Aborted', 'AbortError');
-      }
-
-      let done = false;
-      let timerId: number | null = null;
-      let finishWaiter: () => void = () => {};
-      let cancelWaiter: (err: unknown) => void = () => {};
-
-      const waitForJpeg = new Promise<void>((resolve, reject) => {
-        const onAbort = () => {
-          if (done) return;
-          done = true;
-          cleanup();
-          reject(new DOMException('Aborted', 'AbortError'));
-        };
-        const cleanup = () => {
-          if (timerId !== null) {
-            window.clearTimeout(timerId);
-            timerId = null;
-          }
-          const idx = stackShotWaitersRef.current.indexOf(finishWaiter);
-          if (idx >= 0) {
-            stackShotWaitersRef.current.splice(idx, 1);
-          }
-          if (signal) {
-            signal.removeEventListener('abort', onAbort);
-          }
-        };
-        finishWaiter = () => {
-          if (done) return;
-          done = true;
-          cleanup();
-          resolve();
-        };
-        cancelWaiter = (err: unknown) => {
-          if (done) return;
-          done = true;
-          cleanup();
-          reject(err);
-        };
-
-        stackShotWaitersRef.current.push(finishWaiter);
-        timerId = window.setTimeout(() => {
-          finishWaiter();
-        }, 20000);
-        if (signal) {
-          signal.addEventListener('abort', onAbort, { once: true });
-        }
-      });
-
-      try {
-        await triggerShot();
-      } catch (err) {
-        cancelWaiter(err);
-      }
-
-      await waitForJpeg;
-    },
-    [],
-  );
-
-  const handleStackSessionStart = useCallback(
-    async (baseName: string, useAutoMerge: boolean) => {
-      if (!useAutoMerge) return;
-      await createBackendStackSession(baseName, activeUrlRef.current);
-      backendMergeSessionRef.current = {
-        sessionId: baseName,
-        pendingGrabs: new Set(),
-      };
-      setMergeStatus(null);
-    },
-    [],
-  );
-
-  const handleStackSessionEnd = useCallback(
-    async (baseName: string, useAutoMerge: boolean, aborted: boolean, expectedShots: number) => {
-      if (!useAutoMerge || !backendMergeSessionRef.current) return;
-      const session = backendMergeSessionRef.current;
-
-      if (aborted) {
-        if (session.pendingGrabs.size > 0) {
-          await Promise.allSettled(Array.from(session.pendingGrabs));
-        }
-        if (backendMergeSessionRef.current === session) {
-          backendMergeSessionRef.current = null;
-        }
-        await deleteBackendStackSession(baseName);
-        setMergeStatus(null);
-        return;
-      }
-
-      const mergedFileName = `${baseName}.jpg`;
-      try {
-        setMergeStatus(`Verifying frames (0/${expectedShots})...`);
-        setSavingStatus(`Verifying frames...`);
-
-        // Wait up to 10s for final Jpeg SSE events and in-flight backend grabs to finish
-        const deadline = Date.now() + 10000;
-        let currentFrames = 0;
-        while (true) {
-          if (session.pendingGrabs.size > 0) {
-            await Promise.allSettled(Array.from(session.pendingGrabs));
-          }
-          const stCheck = await getBackendStackStatus(baseName);
-          currentFrames = stCheck.frameCount;
-          setMergeStatus(`Verifying frames (${currentFrames}/${expectedShots})...`);
-          if (currentFrames >= expectedShots && session.pendingGrabs.size === 0) {
-            break;
-          }
-          if (Date.now() >= deadline) {
-            break;
-          }
-          await new Promise((r) => window.setTimeout(r, 300));
-        }
-
-        if (backendMergeSessionRef.current === session) {
-          backendMergeSessionRef.current = null;
-        }
-
-        if (currentFrames < expectedShots) {
-          throw new Error(
-            `Incomplete stack: expected ${expectedShots} photos, got ${currentFrames}. Skipping merge.`,
-          );
-        }
-
-        setMergeStatus(`Merging ${currentFrames} frames with OpenFocus...`);
-        setSavingStatus('Merging with OpenFocus...');
-        await triggerBackendStackMerge(baseName, expectedShots);
-
-        while (true) {
-          await new Promise((r) => window.setTimeout(r, 1000));
-          const st = await getBackendStackStatus(baseName);
-          if (st.status === 'done') {
-            await queueSavePhoto({
-              name: mergedFileName,
-              url: backendStackResultUrl(baseName),
-            });
-            setMergeStatus(`Merged ${currentFrames} frames (1 photo saved)`);
-            break;
-          }
-          if (st.status === 'error') {
-            throw new Error(st.error || 'OpenFocus merge failed');
-          }
-        }
-      } catch (err) {
-        if (backendMergeSessionRef.current === session) {
-          backendMergeSessionRef.current = null;
-        }
-        const msg = err instanceof Error ? err.message : String(err);
-        setErrorMsg(msg);
-        setMergeStatus(`Merge error: ${msg}`);
-        setSavingStatus(null);
-      } finally {
-        await deleteBackendStackSession(baseName);
-      }
-    },
-    [queueSavePhoto],
   );
 
   const eventsCidRef = useRef<string>(getEventsClientId());
@@ -737,7 +522,6 @@ export function App() {
               connected={connected}
               onCapture={handleCapture}
               capturing={Boolean(state?.capturing)}
-              previewMagnification={state?.previewMagnification}
               onError={setErrorMsg}
             />
             <div className="side-column">
@@ -747,29 +531,7 @@ export function App() {
                 connected={connected}
                 onError={setErrorMsg}
               />
-              <FocusControl
-                client={client}
-                state={state}
-                connected={connected}
-                onError={setErrorMsg}
-                onStackSessionChange={(baseName) => {
-                  stackSessionRef.current = baseName ? { baseName, nextIndex: 0 } : null;
-                }}
-                openFocusAvailable={!__CAMERA_EMBEDDED__ && hostCaps.openfocus.available}
-                openFocusReason={hostCaps.openfocus.reason}
-                autoMerge={autoMerge}
-                hideAutoMerge={__CAMERA_EMBEDDED__}
-                onAutoMergeChange={(checked) => {
-                  setAutoMerge(checked);
-                  try {
-                    localStorage.setItem('pmca_automerge_enabled', String(checked));
-                  } catch {}
-                }}
-                mergeStatus={mergeStatus}
-                onStackSessionStart={__CAMERA_EMBEDDED__ ? undefined : handleStackSessionStart}
-                onCaptureStackShot={captureStackShot}
-                onStackSessionEnd={__CAMERA_EMBEDDED__ ? undefined : handleStackSessionEnd}
-              />
+              <FocusControl client={client} connected={connected} onError={setErrorMsg} />
               <AutoSavePanel
                 enabled={autoSaveEnabled}
                 onToggle={(next) => {

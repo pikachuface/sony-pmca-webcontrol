@@ -1,430 +1,252 @@
-import { useRef, useState } from 'react';
-import {
-  type CameraClient,
-  type CameraState,
-  computeFocusStackPositions,
-} from '../api/cameraClient';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { CameraClient } from '../api/cameraClient';
 
 interface FocusControlProps {
   client: CameraClient;
-  state: CameraState | null;
   connected: boolean;
   onError: (msg: string) => void;
-  onStackSessionChange?: (baseName: string | null) => void;
-  openFocusAvailable: boolean;
-  openFocusReason: string;
-  autoMerge: boolean;
-  onAutoMergeChange: (checked: boolean) => void;
-  hideAutoMerge?: boolean;
-  mergeStatus?: string | null;
-  onStackSessionStart?: (baseName: string, autoMerge: boolean) => Promise<void> | void;
-  onCaptureStackShot?: (triggerShot: () => Promise<unknown>, signal?: AbortSignal) => Promise<void>;
-  onStackSessionEnd?: (
-    baseName: string,
-    autoMerge: boolean,
-    aborted: boolean,
-    expectedShots: number,
-  ) => Promise<void> | void;
 }
 
-function formatCaptureBaseName(): string {
-  const d = new Date();
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `capture_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+const STEP_STORAGE_KEY = 'pmca_focus_step';
+const DEFAULT_STEP = 4;
+const MAX_STEP = 64;
+/** Wheel distance (in pixels) that counts as one detent; a mouse notch is about 100px. */
+const WHEEL_PX_PER_TICK = 100;
+const WHEEL_PX_PER_LINE = 33;
+/** Vertical drag distance (in pixels) per detent. */
+const DRAG_PX_PER_TICK = 12;
+/** Knob indicator rotation per detent, purely visual. */
+const DEG_PER_TICK = 18;
+
+function loadStep(): number {
+  try {
+    const v = Number(localStorage.getItem(STEP_STORAGE_KEY));
+    if (Number.isInteger(v) && v >= 1 && v <= MAX_STEP) return v;
+  } catch {}
+  return DEFAULT_STEP;
 }
 
-export function FocusControl({
-  client,
-  state,
-  connected,
-  onError,
-  onStackSessionChange,
-  openFocusAvailable,
-  openFocusReason,
-  autoMerge,
-  onAutoMergeChange,
-  hideAutoMerge = false,
-  mergeStatus,
-  onStackSessionStart,
-  onCaptureStackShot,
-  onStackSessionEnd,
-}: FocusControlProps) {
+/**
+ * Relative focus control: [-] (knob) [+]. Each detent moves focus by the step size, or by 1
+ * while Shift is held. Moves go through `highlevel.shiftFocus`, which works on bodies without
+ * focus drive (ILCE-7) but reports no absolute position, so the badge shows the net shift
+ * since the last reset rather than a lens position.
+ */
+export function FocusControl({ client, connected, onError }: FocusControlProps) {
+  const [stepInput, setStepInput] = useState<string>(() => String(loadStep()));
+  const [shiftHeld, setShiftHeld] = useState(false);
+  const [netShift, setNetShift] = useState(0);
+  const [ticks, setTicks] = useState(0);
   const [busy, setBusy] = useState(false);
-  const [stackRunning, setStackRunning] = useState(false);
-  const [startPos, setStartPos] = useState<string>('');
-  const [endPos, setEndPos] = useState<string>('');
-  const [stepInput, setStepInput] = useState<string>('4');
-  const [settleInput, setSettleInput] = useState<string>('400');
-  const [stackStatus, setStackStatus] = useState<string | null>(null);
-  const [targetFocus, setTargetFocus] = useState<number | null>(null);
-  const targetFocusRef = useRef<number | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const gotoAbortRef = useRef<AbortController | null>(null);
-  const prefixClearTimerRef = useRef<number | null>(null);
 
-  const parsedA = startPos !== '' ? Number(startPos) : NaN;
-  const parsedB = endPos !== '' ? Number(endPos) : NaN;
-  const parsedStep = stepInput.trim() !== '' ? Number(stepInput) : NaN;
-  const isStepValid = Number.isInteger(parsedStep) && parsedStep >= 1;
-  const plannedShots =
-    !Number.isNaN(parsedA) && !Number.isNaN(parsedB) && isStepValid
-      ? computeFocusStackPositions(parsedA, parsedB, parsedStep).length
-      : null;
+  const knobRef = useRef<HTMLDivElement | null>(null);
+  const pendingRef = useRef(0);
+  const inFlightRef = useRef(false);
+  const wheelAccumRef = useRef(0);
+  const dragRef = useRef<{ pointerId: number; lastY: number; accum: number } | null>(null);
 
-  const currentFocus = state?.focus?.currentPosition;
-  const maxFocus = state?.focus?.maxPosition;
-  const canDragFocus =
-    connected && !stackRunning && typeof maxFocus === 'number' && maxFocus > 0;
-  const displayFocus =
-    targetFocus ?? (typeof currentFocus === 'number' ? currentFocus : 0);
-  const pct =
-    typeof maxFocus === 'number' && maxFocus > 0
-      ? Math.min(100, Math.max(0, (displayFocus / maxFocus) * 100))
-      : 0;
+  const parsedStep = Number(stepInput);
+  const step = Number.isInteger(parsedStep) && parsedStep >= 1 ? Math.min(parsedStep, MAX_STEP) : DEFAULT_STEP;
+  const stepRef = useRef(step);
+  stepRef.current = step;
+  const connectedRef = useRef(connected);
+  connectedRef.current = connected;
 
-  const moveFocusTo = async (rawTarget: number) => {
-    if (!canDragFocus || typeof maxFocus !== 'number') {
-      targetFocusRef.current = null;
-      setTargetFocus(null);
-      return;
-    }
-    const target = Math.max(0, Math.min(maxFocus, Math.round(rawTarget)));
-    targetFocusRef.current = target;
-    setTargetFocus(target);
-
-    gotoAbortRef.current?.abort();
-    const controller = new AbortController();
-    gotoAbortRef.current = controller;
+  useEffect(() => {
     try {
-      await client.gotoFocus(target, 0, controller.signal);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return;
+      localStorage.setItem(STEP_STORAGE_KEY, String(step));
+    } catch {}
+  }, [step]);
+
+  // Shift switches every input to single steps while held.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') setShiftHeld(e.type === 'keydown');
+    };
+    const onBlur = () => setShiftHeld(false);
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('keyup', onKey);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('keyup', onKey);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
+
+  // Coalesce detents: one request in flight, everything turned meanwhile goes in the next one.
+  const flush = useCallback(async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    try {
+      while (pendingRef.current !== 0) {
+        const steps = pendingRef.current;
+        pendingRef.current = 0;
+        const res = await client.shiftFocus(steps);
+        setNetShift((n) => n + res.applied);
+        if (!res.accepted) {
+          pendingRef.current = 0;
+          onError('Camera rejected the focus shift (end of focus range?)');
+        }
       }
+    } catch (err) {
+      pendingRef.current = 0;
       onError(err instanceof Error ? err.message : String(err));
     } finally {
-      if (gotoAbortRef.current === controller) {
-        gotoAbortRef.current = null;
-        targetFocusRef.current = null;
-        setTargetFocus(null);
-      }
-    }
-  };
-
-  const commitFocusDrag = () => {
-    const target = targetFocusRef.current;
-    if (target === null) return;
-    void moveFocusTo(target);
-  };
-
-  const stepFocus = (delta: number) => {
-    if (typeof currentFocus !== 'number' || !canDragFocus) {
-      return;
-    }
-    const base = targetFocusRef.current ?? currentFocus;
-    void moveFocusTo(base + delta);
-  };
-
-  const handleStartStack = async () => {
-    const a = Number(startPos);
-    const b = Number(endPos);
-    if (Number.isNaN(a) || Number.isNaN(b) || startPos === '' || endPos === '') {
-      onError('Set both Start (A) and End (B) focus positions first');
-      return;
-    }
-    const stepVal = stepInput.trim() !== '' ? Number(stepInput) : NaN;
-    if (!Number.isInteger(stepVal) || stepVal < 1) {
-      onError('Step must be an integer >= 1');
-      return;
-    }
-    const settleVal = settleInput.trim() !== '' ? Number(settleInput) : NaN;
-    if (Number.isNaN(settleVal) || settleVal < 0) {
-      onError('Settle (ms) must be a valid number >= 0');
-      return;
-    }
-    if (prefixClearTimerRef.current !== null) {
-      window.clearTimeout(prefixClearTimerRef.current);
-      prefixClearTimerRef.current = null;
-    }
-    const runBaseName = formatCaptureBaseName();
-    const useAutoMerge = openFocusAvailable && autoMerge;
-    const expectedShots = computeFocusStackPositions(a, b, stepVal).length;
-    onStackSessionChange?.(runBaseName);
-
-    const controller = new AbortController();
-    abortRef.current = controller;
-    setBusy(true);
-    setStackRunning(true);
-    setStackStatus('Starting focus stack...');
-    let aborted = false;
-    try {
-      await onStackSessionStart?.(runBaseName, useAutoMerge);
-      await client.runFocusStack(
-        a,
-        b,
-        stepVal,
-        settleVal,
-        ({ index, total }) => {
-          setTargetFocus(null);
-          setStackStatus(`Shot ${index}/${total}`);
-        },
-        controller.signal,
-        (targetPos) => {
-          setTargetFocus(targetPos);
-        },
-        onCaptureStackShot,
-      );
-      setStackStatus('Focus stack complete');
-    } catch (err) {
-      aborted = true;
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        setStackStatus('Focus stack aborted');
-      } else {
-        const msg = err instanceof Error ? err.message : String(err);
-        setStackStatus(`Error: ${msg}`);
-        onError(msg);
-      }
-    } finally {
-      setTargetFocus(null);
-      abortRef.current = null;
-      setStackRunning(false);
+      inFlightRef.current = false;
       setBusy(false);
-      void onStackSessionEnd?.(runBaseName, useAutoMerge, aborted, expectedShots);
-      prefixClearTimerRef.current = window.setTimeout(() => {
-        onStackSessionChange?.(null);
-        prefixClearTimerRef.current = null;
-      }, 3500);
+    }
+  }, [client, onError]);
+
+  const turn = useCallback(
+    (detents: number, single: boolean) => {
+      if (!connectedRef.current || detents === 0) return;
+      const perDetent = single ? 1 : stepRef.current;
+      pendingRef.current += detents * perDetent;
+      setTicks((t) => t + detents);
+      void flush();
+    },
+    [flush],
+  );
+
+  // Native wheel listener: React's onWheel is passive and cannot stop the page from scrolling.
+  useEffect(() => {
+    const el = knobRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      // Browsers turn Shift+wheel into horizontal scrolling, so read whichever axis moved.
+      const raw = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      const px = e.deltaMode === 1 ? raw * WHEEL_PX_PER_LINE : e.deltaMode === 2 ? raw * WHEEL_PX_PER_TICK : raw;
+      wheelAccumRef.current -= px; // wheel up = clockwise = +
+      const detents = Math.trunc(wheelAccumRef.current / WHEEL_PX_PER_TICK);
+      if (detents !== 0) {
+        wheelAccumRef.current -= detents * WHEEL_PX_PER_TICK;
+        turn(detents, e.shiftKey);
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [turn]);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!connected || e.button !== 0) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    dragRef.current = { pointerId: e.pointerId, lastY: e.clientY, accum: 0 };
+  };
+
+  const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    drag.accum += drag.lastY - e.clientY; // drag up = +
+    drag.lastY = e.clientY;
+    const detents = Math.trunc(drag.accum / DRAG_PX_PER_TICK);
+    if (detents !== 0) {
+      drag.accum -= detents * DRAG_PX_PER_TICK;
+      turn(detents, e.shiftKey);
     }
   };
 
-  const handleAbortStack = () => {
-    abortRef.current?.abort();
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId === e.pointerId) dragRef.current = null;
   };
 
-  const focusButtons = [
-    { delta: -20, symbol: '««', label: 'Focus Near (-20)' },
-    { delta: -5, symbol: '«', label: 'Focus Near (-5)' },
-    { delta: -1, symbol: '‹', label: 'Focus Near (-1)' },
-    { delta: 1, symbol: '›', label: 'Focus Far (+1)' },
-    { delta: 5, symbol: '»', label: 'Focus Far (+5)' },
-    { delta: 20, symbol: '»»', label: 'Focus Far (+20)' },
-  ];
+  const onKnobKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      turn(1, e.shiftKey);
+    } else if (e.key === 'ArrowDown' || e.key === 'ArrowLeft') {
+      e.preventDefault();
+      turn(-1, e.shiftKey);
+    }
+  };
+
+  const effectiveStep = shiftHeld ? 1 : step;
+  const sign = netShift > 0 ? '+' : '';
 
   return (
     <section className="panel">
-      <div className="panel-header focus-header">
+      <div className="panel-header">
         <div className="panel-title">
           <span>Focus</span>
-          <span className="badge focus-pos-badge">
-            {targetFocus !== null && targetFocus !== currentFocus
-              ? `${currentFocus ?? '--'} → ${targetFocus}`
-              : (currentFocus ?? '--')}{' '}
-            / {maxFocus ?? '--'}
+          <span className="badge" title="Net focus shift since the last reset (this body reports no absolute position)">
+            Δ {sign}
+            {netShift}
           </span>
+          {busy && <span className="muted-tag">moving…</span>}
         </div>
-        <div className="focus-buttons-inline">
-          {focusButtons.map(({ delta, symbol, label }) => (
-            <button
-              key={delta}
-              type="button"
-              className="btn btn-sm"
-              disabled={!canDragFocus || typeof currentFocus !== 'number'}
-              onClick={() => stepFocus(delta)}
-              title={label}
-              aria-label={label}
-            >
-              {symbol}
-            </button>
-          ))}
-        </div>
+        <button
+          type="button"
+          className="btn btn-sm"
+          onClick={() => {
+            setNetShift(0);
+            setTicks(0);
+          }}
+          title="Reset the shift counter (does not move focus)"
+        >
+          Reset Δ
+        </button>
       </div>
 
-      <div
-        className="focus-slider-wrap"
-        title={`Focus ${displayFocus} / ${maxFocus ?? 0} (drag or click to move)`}
-      >
-        <div className="progress-track">
-          <div
-            className="progress-fill"
-            style={{
-              width: `${pct}%`,
-              transition: targetFocus !== null ? 'none' : undefined,
-            }}
-          />
+      <div className="focus-knob-row">
+        <button
+          type="button"
+          className="btn focus-knob-btn"
+          disabled={!connected}
+          onClick={(e) => turn(-1, e.shiftKey)}
+          title={`Focus −${effectiveStep}`}
+          aria-label={`Focus minus ${effectiveStep}`}
+        >
+          −
+        </button>
+        <div
+          ref={knobRef}
+          className={`focus-knob ${!connected ? 'is-disabled' : ''}`}
+          role="spinbutton"
+          aria-label="Focus knob: scroll, drag up or down, or use arrow keys"
+          aria-valuenow={netShift}
+          aria-disabled={!connected}
+          tabIndex={connected ? 0 : -1}
+          title="Scroll or drag to turn focus. Hold Shift for single steps."
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={endDrag}
+          onPointerCancel={endDrag}
+          onKeyDown={onKnobKeyDown}
+        >
+          <div className="focus-knob-dial" style={{ transform: `rotate(${ticks * DEG_PER_TICK}deg)` }}>
+            <span className="focus-knob-indicator" />
+          </div>
         </div>
+        <button
+          type="button"
+          className="btn focus-knob-btn"
+          disabled={!connected}
+          onClick={(e) => turn(1, e.shiftKey)}
+          title={`Focus +${effectiveStep}`}
+          aria-label={`Focus plus ${effectiveStep}`}
+        >
+          +
+        </button>
+      </div>
+
+      <div className="focus-step-row">
+        <label htmlFor="focus-step-input">Step size</label>
         <input
-          type="range"
-          className="focus-slider"
-          min={0}
-          max={typeof maxFocus === 'number' && maxFocus > 0 ? maxFocus : 100}
-          value={displayFocus}
-          disabled={!canDragFocus}
-          aria-label="Manual focus position"
-          onChange={(e) => {
-            const next = Number(e.target.value);
-            targetFocusRef.current = next;
-            setTargetFocus(next);
-          }}
-          onPointerUp={commitFocusDrag}
-          onKeyUp={(e) => {
-            if (
-              e.key === 'ArrowLeft' ||
-              e.key === 'ArrowRight' ||
-              e.key === 'ArrowUp' ||
-              e.key === 'ArrowDown' ||
-              e.key === 'Home' ||
-              e.key === 'End'
-            ) {
-              commitFocusDrag();
-            }
-          }}
+          id="focus-step-input"
+          type="number"
+          min={1}
+          max={MAX_STEP}
+          className="input-sm"
+          value={stepInput}
+          onChange={(e) => setStepInput(e.target.value)}
+          onBlur={() => setStepInput(String(step))}
+          title={`Focus steps per detent (1–${MAX_STEP})`}
         />
-      </div>
-
-      <div className="subpanel">
-        <div className="subpanel-title">Focus Stacking (Client-Side Closed Loop)</div>
-        <div className="stack-grid">
-          <div className="field-inline stack-col-left">
-            <label>Start A</label>
-            <input
-              type="number"
-              className="input-sm"
-              value={startPos}
-              onChange={(e) => setStartPos(e.target.value)}
-              placeholder="pos"
-              aria-label="Focus stack Start A position"
-              title="Start A focus position"
-            />
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={typeof currentFocus !== 'number'}
-              onClick={() => setStartPos(String(currentFocus ?? ''))}
-              title="Set Start A to current focus position"
-              aria-label="Set Start A to current focus position"
-            >
-              Set
-            </button>
-          </div>
-
-          <button
-            type="button"
-            className="btn btn-sm stack-swap-btn"
-            disabled={stackRunning || (startPos === '' && endPos === '')}
-            onClick={() => {
-              setStartPos(endPos);
-              setEndPos(startPos);
-            }}
-            title="Swap Start A and End B"
-            aria-label="Swap Start A and End B"
-          >
-            ⇄
-          </button>
-
-          <div className="field-inline stack-col-right">
-            <label>End B</label>
-            <input
-              type="number"
-              className="input-sm"
-              value={endPos}
-              onChange={(e) => setEndPos(e.target.value)}
-              placeholder="pos"
-              aria-label="Focus stack End B position"
-              title="End B focus position"
-            />
-            <button
-              type="button"
-              className="btn btn-sm"
-              disabled={typeof currentFocus !== 'number'}
-              onClick={() => setEndPos(String(currentFocus ?? ''))}
-              title="Set End B to current focus position"
-              aria-label="Set End B to current focus position"
-            >
-              Set
-            </button>
-          </div>
-
-          <div className="field-inline stack-col-left">
-            <label>Step</label>
-            <input
-              type="number"
-              min={1}
-              max={500}
-              className="input-sm"
-              value={stepInput}
-              placeholder="4"
-              onChange={(e) => setStepInput(e.target.value)}
-              aria-label="Focus stack step size"
-              title="Focus step size between shots"
-            />
-            <span className="muted-tag">
-              {plannedShots !== null ? `${plannedShots} shots` : '-- shots'}
-            </span>
-          </div>
-
-          <div className="field-inline stack-col-right">
-            <label>Settle (ms)</label>
-            <input
-              type="number"
-              min={0}
-              max={5000}
-              step={50}
-              className="input-sm"
-              value={settleInput}
-              placeholder="400"
-              onChange={(e) => setSettleInput(e.target.value)}
-              aria-label="Focus stack settle delay in milliseconds"
-              title="Wait time in milliseconds after moving focus before shooting"
-            />
-          </div>
-        </div>
-
-        <div className="stack-actions" style={{ flexWrap: 'wrap' }}>
-          {!hideAutoMerge && (
-            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginRight: 'auto' }}>
-              <label className={`checkbox-row ${!openFocusAvailable ? 'is-disabled' : ''}`}>
-                <input
-                  type="checkbox"
-                  disabled={!openFocusAvailable || stackRunning}
-                  checked={openFocusAvailable && autoMerge}
-                  onChange={(e) => onAutoMergeChange(e.target.checked)}
-                />
-                <span>Auto Merge</span>
-              </label>
-              {!openFocusAvailable && (
-                <span className="info-tooltip-wrap">
-                  <span className="info-icon" tabIndex={0} aria-label={openFocusReason}>
-                    i
-                  </span>
-                  <span className="info-tooltip-bubble">{openFocusReason}</span>
-                </span>
-              )}
-            </div>
-          )}
-          {(mergeStatus || stackStatus) && (
-            <span className="muted-tag">
-              {mergeStatus ?? stackStatus}
-            </span>
-          )}
-          {!stackRunning ? (
-            <button
-              type="button"
-              className="btn btn-primary btn-sm"
-              disabled={!connected || busy}
-              onClick={handleStartStack}
-            >
-              Run Focus Stack
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="btn btn-danger btn-sm"
-              onClick={handleAbortStack}
-            >
-              Abort Stack
-            </button>
-          )}
-        </div>
+        <span className={`muted-tag ${shiftHeld ? 'focus-shift-active' : ''}`}>
+          {shiftHeld ? 'Shift: 1 step' : 'Hold Shift for 1 step'}
+        </span>
       </div>
     </section>
   );
