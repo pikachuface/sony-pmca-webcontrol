@@ -93,6 +93,12 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         return m_goalController;
     }
 
+    private final SpikeController m_spikeController = new SpikeController(this);
+
+    public SpikeController getSpikeController() {
+        return m_spikeController;
+    }
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -546,6 +552,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         }
         setAutoPowerOffMode(true);
 
+        m_spikeController.shutdown();
         m_liveViewManager.stop();
 
         if (m_camera != null) {
@@ -770,13 +777,22 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
         try {
-            Camera cam = m_camera.getNormalCamera();
-            cam.setPreviewDisplay(holder);
-            cam.startPreview();
-            m_liveViewManager.start(m_camera, "/data/data/" + getPackageName() + "/lib/lib_memorymap.so");
+            startPreviewAndLiveView(holder);
         } catch (Throwable t) {
             Logger.error("surfaceCreated error: " + t.toString());
         }
+    }
+
+    /** Re-attaches the preview surface and live view after CameraEx.reopen (main thread). */
+    public void restartPreview() throws Exception {
+        startPreviewAndLiveView(m_surfaceHolder);
+    }
+
+    private void startPreviewAndLiveView(SurfaceHolder holder) throws Exception {
+        Camera cam = m_camera.getNormalCamera();
+        cam.setPreviewDisplay(holder);
+        cam.startPreview();
+        m_liveViewManager.start(m_camera, "/data/data/" + getPackageName() + "/lib/lib_memorymap.so");
     }
 
     @Override

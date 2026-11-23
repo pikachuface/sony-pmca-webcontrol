@@ -190,6 +190,16 @@ public class RpcDispatcher {
                 addSyntheticMethod(arr, queryFilter, "setZoomPosition", new String[]{"int", "int"}, "JSONObject");
                 targets.put("highlevel", arr);
             }
+            if (matchesTarget(targetFilter, "spike")) {
+                JSONArray arr = new JSONArray();
+                addSyntheticMethod(arr, queryFilter, "probe", new String[]{}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "shiftFocus", new String[]{"int"}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "faceStart", new String[]{"int"}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "faceStop", new String[]{}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "movieStart", new String[]{"boolean"}, "JSONObject");
+                addSyntheticMethod(arr, queryFilter, "movieStop", new String[]{}, "JSONObject");
+                targets.put("spike", arr);
+            }
 
             root.put("targets", targets);
         } catch (Throwable ignored) {

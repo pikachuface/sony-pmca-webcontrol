@@ -138,6 +138,17 @@ public class MacroHttpServer extends NanoHTTPD {
                     out.put("result", result);
                     return jsonOk(out.toString());
                 }
+                if (!body.has("calls") && "spike".equals(body.optString("target", ""))) {
+                    String rpcMethod = body.optString("method", "");
+                    JSONArray args = body.optJSONArray("args");
+                    JSONObject result = m_activity.getSpikeController().execute(rpcMethod, args);
+                    JSONObject out = new JSONObject();
+                    out.put("ok", true);
+                    out.put("target", "spike");
+                    out.put("method", rpcMethod);
+                    out.put("result", result);
+                    return jsonOk(out.toString());
+                }
                 JSONObject res = m_activity.runOnMainSync(new Callable<JSONObject>() {
                     @Override
                     public JSONObject call() throws Exception {
