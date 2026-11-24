@@ -179,6 +179,16 @@ public class CameraGoalController {
             }
             return setFocusOffset(args.getInt(0), args.length() >= 2 && args.getBoolean(1));
         }
+        if ("getAfMode".equals(method)) {
+            return m_activity.getAfMode().getState();
+        }
+        if ("setAfMode".equals(method)) {
+            if (args == null || args.length() < 1 || args.optJSONObject(0) == null) {
+                throw new IllegalArgumentException(
+                        "setAfMode requires ({continuous?, faces?, area?: \"wide\"|\"spot\", x?, y?})");
+            }
+            return m_activity.getAfMode().setAfMode(args.getJSONObject(0));
+        }
         if ("getCaptureSettings".equals(method)) {
             return getCaptureSettings();
         }
@@ -240,6 +250,28 @@ public class CameraGoalController {
     private static final int DEFAULT_MAX_FOCUS_SHIFT = 16;
     /** A shiftFocusPosition call normally returns in 130-220 ms on the ILCE-7. */
     private static final long FOCUS_SHIFT_TIMEOUT_MS = 2500L;
+
+    /** Lock that serializes autofocus and focus offset calls (AfModeController takes it too). */
+    Object focusOpLock() {
+        return m_focusOpLock;
+    }
+
+    /** Makes a running autoFocusAt give up at its next check (within about 100 ms). */
+    void supersedeFocus() {
+        m_focus.nextGeneration();
+    }
+
+    /**
+     * Continuous AF moved the lens away from the last single AF: offsets need a new autoFocusAt
+     * before shiftFocusPosition may be called again (it blocked forever on an invalid AF base).
+     */
+    void invalidateAfBase() {
+        m_afEstablished = false;
+        synchronized (m_focusOpLock) {
+            m_focusOffset = 0;
+        }
+        publishFocusShift();
+    }
 
     /** Set once an autoFocusAt succeeded; see setFocusOffset. */
     private volatile boolean m_afEstablished;
@@ -310,6 +342,9 @@ public class CameraGoalController {
      * thread with a timeout, so a blocked call cannot freeze the main thread.
      */
     private JSONObject setFocusOffset(int offset, boolean skipAfCheck) throws Exception {
+        if (m_activity.getAfMode().isContinuous()) {
+            throw new IllegalStateException("Continuous AF is on, the camera focuses by itself: switch to single AF to fine-tune focus");
+        }
         if (!m_afEstablished && !skipAfCheck) {
             throw new IllegalStateException("Focus offset needs an autofocus first: click the live view to AF, then use the knob");
         }
@@ -516,10 +551,49 @@ public class CameraGoalController {
      */
     private static final long AF_SETTLE_MS = 300L;
 
+    /**
+     * Flexible spot focus point for a position (0..1) in the live view: the range the body
+     * reports for the flexible spot, or the ILCE-7's range when it reports none.
+     */
+    static int[] flexSpotPoint(CameraEx cam, double nx, double ny) {
+        int left = -784, right = 785, top = -819, bottom = 820;
+        try {
+            CameraEx.FocusAreaInfos[] infos = cam.getFocusAreaInfos(0);
+            if (infos != null) {
+                for (CameraEx.FocusAreaInfos info : infos) {
+                    if (info != null && CameraEx.ParametersModifier.FOCUS_AREA_MODE_FLEX_SPOT.equals(info.focusAreaMode)
+                            && info.rectInfos != null && info.rectInfos.length > 0 && info.rectInfos[0] != null && info.rectInfos[0].rect != null) {
+                        left = info.rectInfos[0].rect.left;
+                        right = info.rectInfos[0].rect.right;
+                        top = info.rectInfos[0].rect.top;
+                        bottom = info.rectInfos[0].rect.bottom;
+                        break;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return new int[]{
+                (int) Math.round(left + nx * (right - left)),
+                (int) Math.round(top + ny * (bottom - top)),
+        };
+    }
+
     private JSONObject autoFocusAt(double nx, double ny) throws Exception {
-        final long myGen = m_focus.nextGeneration();
         final double clampedX = Math.max(0.0, Math.min(1.0, nx));
         final double clampedY = Math.max(0.0, Math.min(1.0, ny));
+        AfModeController afMode = m_activity.getAfMode();
+        if (afMode.isContinuous()) {
+            // Continuous AF: move its spot here instead of a single AF.
+            JSONObject want = new JSONObject();
+            want.put("x", clampedX);
+            want.put("y", clampedY);
+            JSONObject res = afMode.setAfMode(want);
+            res.put("superseded", false);
+            res.put("timedOut", false);
+            return res;
+        }
+        final long myGen = m_focus.nextGeneration();
 
         synchronized (m_focusOpLock) {
             if (!m_focus.isCurrent(myGen)) {
@@ -553,26 +627,9 @@ public class CameraGoalController {
                         } catch (Throwable ignored) {
                         }
 
-                        int left = -784, right = 785, top = -819, bottom = 820;
-                        try {
-                            CameraEx.FocusAreaInfos[] infos = cam.getFocusAreaInfos(0);
-                            if (infos != null) {
-                                for (CameraEx.FocusAreaInfos info : infos) {
-                                    if (info != null && CameraEx.ParametersModifier.FOCUS_AREA_MODE_FLEX_SPOT.equals(info.focusAreaMode)
-                                            && info.rectInfos != null && info.rectInfos.length > 0 && info.rectInfos[0] != null && info.rectInfos[0].rect != null) {
-                                        left = info.rectInfos[0].rect.left;
-                                        right = info.rectInfos[0].rect.right;
-                                        top = info.rectInfos[0].rect.top;
-                                        bottom = info.rectInfos[0].rect.bottom;
-                                        break;
-                                    }
-                                }
-                            }
-                        } catch (Throwable ignored) {
-                        }
-
-                        int fx = (int) Math.round(left + clampedX * (right - left));
-                        int fy = (int) Math.round(top + clampedY * (bottom - top));
+                        int[] pt = flexSpotPoint(cam, clampedX, clampedY);
+                        int fx = pt[0];
+                        int fy = pt[1];
                         targetPoint[0] = fx;
                         targetPoint[1] = fy;
 

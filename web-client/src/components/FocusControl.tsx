@@ -1,13 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { CameraClient, FocusShiftState } from '../api/cameraClient';
+import type { AfModePatch, AfModeState, CameraClient, FocusShiftState } from '../api/cameraClient';
 
 interface FocusControlProps {
   client: CameraClient;
   connected: boolean;
   /** The camera's focus offset; offsets are possible only after a successful autofocus. */
   focusShift?: FocusShiftState;
+  /** Continuous AF and face detection. */
+  afMode?: AfModeState;
+  /** Status of the last AutoFocusDone event. */
+  afStatus?: number;
+  /** Number of faces the camera currently detects. */
+  faceCount: number;
   onError: (msg: string) => void;
 }
+
+/** AutoFocusDone status while continuous AF runs. */
+const AF_C_STATUS: Record<number, string> = { 0: 'idle', 1: 'locked', 2: 'no lock', 3: 'focusing', 4: 'tracking' };
 
 const STEP_STORAGE_KEY = 'pmca_focus_step';
 const DEFAULT_STEP = 4;
@@ -41,12 +50,15 @@ function clamp(v: number, lo: number, hi: number): number {
  * offset by the step size (1 while Shift is held), and a new AF (click the live view) moves
  * the base and returns the knob to 0.
  */
-export function FocusControl({ client, connected, focusShift, onError }: FocusControlProps) {
+export function FocusControl({ client, connected, focusShift, afMode, afStatus, faceCount, onError }: FocusControlProps) {
   const [stepInput, setStepInput] = useState<string>(() => String(loadStep()));
   const [shiftHeld, setShiftHeld] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [modeBusy, setModeBusy] = useState(false);
 
-  const ready = connected && focusShift?.ready === true;
+  const continuous = afMode?.continuous === true;
+  const faces = afMode?.faces === true;
+  const ready = connected && focusShift?.ready === true && !continuous;
   const min = focusShift?.min ?? -DEFAULT_RANGE;
   const max = focusShift?.max ?? DEFAULT_RANGE;
   const cameraOffset = focusShift?.offset ?? 0;
@@ -200,6 +212,18 @@ export function FocusControl({ client, connected, focusShift, onError }: FocusCo
     }
   };
 
+  const changeAfMode = async (patch: AfModePatch) => {
+    if (modeBusy) return;
+    setModeBusy(true);
+    try {
+      await client.setAfMode(patch);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setModeBusy(false);
+    }
+  };
+
   const effectiveStep = shiftHeld ? 1 : step;
   const offsetLabel = target === 0 ? '±0' : target > 0 ? `+${target}` : String(target);
   const knobDeg = (target / Math.max(1, max)) * KNOB_SWEEP_DEG;
@@ -210,10 +234,17 @@ export function FocusControl({ client, connected, focusShift, onError }: FocusCo
       <div className="panel-header">
         <div className="panel-title">
           <span>Focus</span>
-          <span className="badge" title="Focus offset from the last autofocus position">
-            AF {offsetLabel}
-          </span>
-          {busy && <span className="muted-tag">moving…</span>}
+          {continuous ? (
+            <span className="badge badge-live" title="Continuous AF: status of the camera's last AF report">
+              AF-C {afStatus !== undefined ? (AF_C_STATUS[afStatus] ?? afStatus) : ''}
+            </span>
+          ) : (
+            <span className="badge" title="Focus offset from the last autofocus position">
+              AF {offsetLabel}
+            </span>
+          )}
+          {faces && <span className="muted-tag">{faceCount === 1 ? '1 face' : `${faceCount} faces`}</span>}
+          {(busy || modeBusy) && <span className="muted-tag">{modeBusy ? 'switching…' : 'moving…'}</span>}
         </div>
         <button
           type="button"
@@ -226,7 +257,55 @@ export function FocusControl({ client, connected, focusShift, onError }: FocusCo
         </button>
       </div>
 
-      {connected && !ready && (
+      <div className="quality-row">
+        <span className="quality-label">AF</span>
+        <div className="segmented" role="group" aria-label="Autofocus mode">
+          <button
+            type="button"
+            className={`segmented-btn ${!continuous ? 'is-active' : ''}`}
+            aria-pressed={!continuous}
+            disabled={!connected || modeBusy}
+            onClick={() => continuous && void changeAfMode({ continuous: false })}
+            title="Single AF: click the live view to focus once, then fine-tune with the knob"
+          >
+            Single
+          </button>
+          <button
+            type="button"
+            className={`segmented-btn ${continuous ? 'is-active' : ''}`}
+            aria-pressed={continuous}
+            disabled={!connected || modeBusy}
+            onClick={() => !continuous && void changeAfMode({ continuous: true, area: 'wide' })}
+            title="Continuous AF (AF-C): the camera keeps refocusing on its own"
+          >
+            Continuous
+          </button>
+        </div>
+        <button
+          type="button"
+          className={`btn btn-sm ${faces ? 'btn-active' : ''}`}
+          aria-pressed={faces}
+          disabled={!connected || modeBusy}
+          onClick={() => void changeAfMode({ faces: !faces })}
+          title="Face detection: the camera finds faces and focuses on them first"
+        >
+          Faces
+        </button>
+      </div>
+
+      {connected && continuous && (
+        <p className="focus-lock-hint">
+          {afMode?.area === 'spot' ? 'Continuous AF follows the spot you clicked. ' : 'Continuous AF over the Wide area. '}
+          {faces ? 'Faces come first. ' : ''}
+          Click the live view to move the AF spot.{' '}
+          {afMode?.area === 'spot' && (
+            <button type="button" className="autosave-link" disabled={modeBusy} onClick={() => void changeAfMode({ area: 'wide' })}>
+              Back to Wide
+            </button>
+          )}
+        </p>
+      )}
+      {connected && !continuous && !ready && (
         <p className="focus-lock-hint">Click the live view to autofocus first. The knob fine-tunes focus around that point.</p>
       )}
 

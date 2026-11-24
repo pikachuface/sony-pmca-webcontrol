@@ -135,6 +135,15 @@ function applyEventsToState(
       case 'FocusShift':
         next.focusShift = d as unknown as CameraState['focusShift'];
         break;
+      case 'AfMode':
+        next.afMode = d as unknown as CameraState['afMode'];
+        break;
+      case 'Faces':
+        next.faces = d as unknown as CameraState['faces'];
+        break;
+      case 'AutoFocusDone':
+        if (typeof d.status === 'number') next.afStatus = d.status;
+        break;
       case 'StoreImageComplete':
         next.lastStoreImage = d as CameraState['lastStoreImage'];
         break;
@@ -537,11 +546,16 @@ export function App() {
     const handleIncomingEvents = async (incoming: CameraEvent[]) => {
       if (cancelled || incoming.length === 0) return;
       const now = Date.now();
-      const logged: LoggedCameraEvent[] = incoming.map((ev) => ({
-        ...ev,
-        receivedAt: now,
-      }));
-      setEvents((prev) => [...logged.slice().reverse(), ...prev].slice(0, 200));
+      // Faces arrive several times a second while face detection is on; keep them out of the log.
+      const logged: LoggedCameraEvent[] = incoming
+        .filter((ev) => ev.type !== 'Faces')
+        .map((ev) => ({
+          ...ev,
+          receivedAt: now,
+        }));
+      if (logged.length > 0) {
+        setEvents((prev) => [...logged.slice().reverse(), ...prev].slice(0, 200));
+      }
       let needFullRefresh = false;
       setState((prev) => {
         const applied = applyEventsToState(prev, incoming);
@@ -764,6 +778,7 @@ export function App() {
               connected={connected}
               onCapture={handleCapture}
               capturing={Boolean(state?.capturing)}
+              faces={state?.afMode?.faces ? state?.faces?.faces : undefined}
               onError={setErrorMsg}
             />
             <div className="side-column">
@@ -795,6 +810,9 @@ export function App() {
                 client={client}
                 connected={connected}
                 focusShift={state?.focusShift}
+                afMode={state?.afMode}
+                afStatus={state?.afStatus}
+                faceCount={state?.faces?.faces?.length ?? 0}
                 onError={setErrorMsg}
               />
               {mode !== 'webcam' && (

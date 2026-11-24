@@ -62,6 +62,12 @@ export interface CameraState {
   lastShutterStatus?: number;
   capturing?: boolean;
   focusShift?: FocusShiftState;
+  /** Continuous AF and face detection (`highlevel.setAfMode`). */
+  afMode?: AfModeState;
+  /** Faces the camera detects while face detection is on. */
+  faces?: FacesState;
+  /** Status of the last AutoFocusDone event: 0 cleared, 1 locked, 2 cannot lock, 4 continuous. */
+  afStatus?: number;
   timelapse?: TimelapseState;
   lens?: {
     LensName?: string;
@@ -131,6 +137,35 @@ export interface AutoFocusResult {
   x?: number;
   y?: number;
   position?: number;
+  /** Continuous AF is on: the click moved its spot instead of a single AF. */
+  continuous?: boolean;
+}
+
+/**
+ * Continuous AF (the body's AF-C, refocusing by itself) and face detection. `area` "wide" is
+ * the camera's Wide area, "spot" a flexible spot at x, y (0..1 of the unrotated live view).
+ */
+export interface AfModeState {
+  continuous: boolean;
+  faces: boolean;
+  area: 'wide' | 'spot';
+  x?: number;
+  y?: number;
+}
+
+export type AfModePatch = Partial<AfModeState>;
+
+/** A detected face, normalized to the unrotated live view frame. */
+export interface FaceBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  id: number;
+}
+
+export interface FacesState {
+  faces: FaceBox[];
 }
 
 export interface OutputCrop {
@@ -522,6 +557,11 @@ export class CameraClient {
 
   autoFocusAt(normX: number, normY: number): Promise<AutoFocusResult> {
     return this.call<AutoFocusResult>('highlevel', 'autoFocusAt', [normX, normY]);
+  }
+
+  /** Switches continuous AF and face detection; returns the new state. */
+  setAfMode(patch: AfModePatch): Promise<AfModeState> {
+    return this.call<AfModeState>('highlevel', 'setAfMode', [patch]);
   }
 
   setPreviewMagnification(factor: 100 | 200, x: number, y: number): Promise<unknown> {

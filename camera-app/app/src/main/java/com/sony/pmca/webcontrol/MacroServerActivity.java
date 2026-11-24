@@ -152,6 +152,23 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         return m_goalController;
     }
 
+    private final AfModeController m_afMode = new AfModeController(this);
+
+    public AfModeController getAfMode() {
+        return m_afMode;
+    }
+
+    /** AF-C and face detection state for the status line, such as "AF-C Face:1". */
+    private volatile String m_afLabel = "";
+
+    public void setAfLabel(String label) {
+        String l = label != null ? label : "";
+        if (!l.equals(m_afLabel)) {
+            m_afLabel = l;
+            updateStatusText();
+        }
+    }
+
     private final OutputCropper m_outputCropper = new OutputCropper();
     private final TimelapseController m_timelapse = new TimelapseController(this);
 
@@ -238,6 +255,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             registerCameraListeners();
             initCameraDefaults();
             refreshInitialState();
+            m_afMode.onCameraOpened();
             updateStatusText();
         } catch (Throwable t) {
             Logger.error("onResume camera init error: " + t.toString());
@@ -675,6 +693,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
 
         if (m_camera != null) {
             m_surfaceHolder.removeCallback(this);
+            m_afMode.onCameraClosing(m_camera);
             try {
                 m_camera.stopZoom();
             } catch (Throwable ignored) {
@@ -920,7 +939,8 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         final String isoStr = (m_iso == 0) ? "AUTO" : String.valueOf(m_iso);
         final String flStr = (m_focalLength > 0) ? ("  " + Math.round(m_focalLength / 10.0f) + "mm") : "";
         final String zoomStr = (m_digitalZoom > 100) ? String.format(Locale.US, "  DZ:%.1fx", m_digitalZoom / 100.0f) : "";
-        final String text = apStr + "  " + m_shutterSpeed + "  ISO:" + isoStr + flStr + zoomStr + "  MF:" + m_curFocus + "/" + m_maxFocus;
+        final String text = apStr + "  " + m_shutterSpeed + "  ISO:" + isoStr + flStr + zoomStr + "  MF:" + m_curFocus + "/" + m_maxFocus
+                + (m_afLabel.length() > 0 ? "  " + m_afLabel : "");
         runOnUiThread(new Runnable() {
             @Override
             public void run() {

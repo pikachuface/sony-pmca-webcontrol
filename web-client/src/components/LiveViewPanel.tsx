@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CameraClient } from '../api/cameraClient';
+import type { CameraClient, FaceBox } from '../api/cameraClient';
 import { CropOverlay } from './CropOverlay';
 import { clamp, containBox, rectDisplayToImage, rectImageToDisplay, type NRect } from './viewGeometry';
 
@@ -12,6 +12,8 @@ interface LiveViewPanelProps {
   connected: boolean;
   onCapture: () => void;
   capturing: boolean;
+  /** Faces the camera detects (unrotated, normalized); undefined while face detection is off. */
+  faces?: FaceBox[];
   onError?: (msg: string | null) => void;
 }
 
@@ -32,6 +34,7 @@ export function LiveViewPanel({
   connected,
   onCapture,
   capturing,
+  faces,
   onError,
 }: LiveViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -44,7 +47,7 @@ export function LiveViewPanel({
   const [showGrid, setShowGrid] = useState(true);
   const [peaking, setPeaking] = useState(false);
   const [showHistogram, setShowHistogram] = useState(false);
-  const [afStatus, setAfStatus] = useState<'idle' | 'focusing' | 'ok' | 'fail'>('idle');
+  const [afStatus, setAfStatus] = useState<'idle' | 'focusing' | 'ok' | 'fail' | 'afc'>('idle');
   const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
   const [rotationDeg, setRotationDeg] = useState<0 | 90 | 180 | 270>(() => {
     try {
@@ -60,7 +63,7 @@ export function LiveViewPanel({
 
   const focusPointRef = useRef<{ x: number; y: number } | null>(null);
   focusPointRef.current = focusPoint;
-  const afStatusRef = useRef<'idle' | 'focusing' | 'ok' | 'fail'>('idle');
+  const afStatusRef = useRef<'idle' | 'focusing' | 'ok' | 'fail' | 'afc'>('idle');
   afStatusRef.current = afStatus;
   const liveViewCidRef = useRef<string>(getLiveViewClientId());
   const afTimerRef = useRef<number | null>(null);
@@ -233,7 +236,9 @@ export function LiveViewPanel({
                     ? 'AF...'
                     : afStatusRef.current === 'ok'
                       ? 'AF OK'
-                      : 'AF Fail';
+                      : afStatusRef.current === 'afc'
+                        ? 'AF-C'
+                        : 'AF Fail';
                 drawFocusBox(
                   ctx,
                   focusPointRef.current.x,
@@ -433,7 +438,7 @@ export function LiveViewPanel({
     try {
       const res = await client.autoFocusAt(normX, normY);
       if (!res.superseded) {
-        setAfStatus(res.focused ? 'ok' : 'fail');
+        setAfStatus(res.continuous ? 'afc' : res.focused ? 'ok' : 'fail');
         scheduleAfDismiss(2000);
       }
     } catch (err) {
@@ -513,6 +518,18 @@ export function LiveViewPanel({
     width: viewScale * gridBase.width,
     height: viewScale * gridBase.height,
   };
+
+  // Face boxes in stage pixels, like the grid (outside the transformed viewport).
+  const faceRects = (faces ?? []).map((f) => {
+    const d = rectImageToDisplay(f, rotationDeg);
+    return {
+      id: f.id,
+      left: viewX + viewScale * (box.left + d.x * box.width),
+      top: viewY + viewScale * (box.top + d.y * box.height),
+      width: viewScale * d.w * box.width,
+      height: viewScale * d.h * box.height,
+    };
+  });
 
   const clampPan = (x: number, y: number, zoom: number) => {
     const maxX = (stageSize.w * zoom - stageSize.w) / 2;
@@ -794,6 +811,15 @@ export function LiveViewPanel({
             <span className="grid-line grid-line-h" style={{ top: '66.667%' }} />
           </div>
         )}
+        {connected && streaming && !frameError &&
+          faceRects.map((r, i) => (
+            <div
+              key={`${r.id}-${i}`}
+              className="face-box"
+              style={{ left: r.left, top: r.top, width: r.width, height: r.height }}
+              aria-hidden="true"
+            />
+          ))}
         {showHistogram && connected && streaming && !frameError && (
           <canvas
             ref={histCanvasRef}
