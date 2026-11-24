@@ -507,6 +507,15 @@ public class CameraGoalController {
         }
     }
 
+    /**
+     * Wait between the AF callback and the switch to manual focus. The lens is still settling
+     * when the callback fires; switching at once (about 20-50 ms later, as before) froze it short
+     * of the focus point, so the live view first got sharp and then blurred. Measured on the
+     * ILCE-7 with the debug console from a defocused start: 0 ms ended at sharpness 24-41
+     * against a peak of 54-77 during AF; 100, 250 and 500 ms all ended at the peak (76).
+     */
+    private static final long AF_SETTLE_MS = 300L;
+
     private JSONObject autoFocusAt(double nx, double ny) throws Exception {
         final long myGen = m_focus.nextGeneration();
         final double clampedX = Math.max(0.0, Math.min(1.0, nx));
@@ -599,6 +608,9 @@ public class CameraGoalController {
                             break;
                         }
                     }
+                }
+                if (afDone[0] && m_focus.isCurrent(myGen)) {
+                    Thread.sleep(AF_SETTLE_MS);
                 }
             } finally {
                 try {

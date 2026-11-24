@@ -61,7 +61,9 @@ public class DebugServer extends NanoHTTPD {
             + "dbg.proxy(Iface.class, this) turns a scripted object into an interface (callbacks);\n"
             + "dbg.frameSize() is the newest live view JPEG size (a rough sharpness signal).\n"
             + "print(x) goes to the response output. Never wait on the main thread for a\n"
-            + "callback that the main thread delivers.\n";
+            + "callback that the main thread delivers.\n"
+            + "Redefining a scripted method keeps the FIRST definition (BeanShell 2.0b6);\n"
+            + "send reset=1 when a script defines methods that may have changed.\n";
 
     private final MacroServerActivity m_activity;
     private final String m_key;
