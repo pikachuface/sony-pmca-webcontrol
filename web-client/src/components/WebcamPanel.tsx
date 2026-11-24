@@ -76,7 +76,7 @@ export function WebcamPanel({ client, connected, cropEnabled }: WebcamPanelProps
         MJPEG, 640 px wide, up to about 18 fps (the camera's live view; fewer in dim light and with more viewers). {cropEnabled ? 'Output is cropped.' : 'Output equals Full until you set a crop (✂ in the live view).'} Up to 3 viewers at once, including this page.
       </p>
       <p className="quality-note">
-        OBS: Sources → Media Source → uncheck Local File → paste the URL; set Network Buffering to 0 MB, or the picture lags by seconds. Photos are not saved in this mode unless you press the shutter (then only to the SD card).
+        OBS: Sources → Media Source → uncheck Local File → paste the URL → FFmpeg Options use_wallclock_as_timestamps=1 (else it jerks about once a second: the stream has no timestamps and FFmpeg assumes 25 fps) → Network Buffering 0 MB (else it lags by seconds). Photos are not saved in this mode unless you press the shutter (then only to the SD card).
       </p>
     </section>
   );
