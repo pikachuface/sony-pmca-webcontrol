@@ -36,6 +36,16 @@ public final class PhotoStorageHelper {
         return name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".arw");
     }
 
+    /** True when {@code f} (after resolving links and "..") lies on the external storage. */
+    public static boolean isOnCard(File f) {
+        try {
+            String root = Environment.getExternalStorageDirectory().getCanonicalPath();
+            return f.getCanonicalPath().startsWith(root + "/");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     public static File resolveSdDir(String relDir) {
         File external = Environment.getExternalStorageDirectory();
         File dcim = new File(external, "DCIM");

@@ -55,6 +55,8 @@ dependencies {
     provided 'com.github.ma1co.OpenMemories-Framework:stubs:-SNAPSHOT'
     compile 'com.github.ma1co.OpenMemories-Framework:framework:-SNAPSHOT'
     compile 'com.nanohttpd:nanohttpd:2.1.1'
+    // Debug console (DebugServer): Java-syntax scripting on the camera. Apache 2.0, Java 5 bytecode.
+    compile 'org.apache-extras.beanshell:bsh:2.0b6'
 }
 
 task buildCameraWebUi(type: Exec) {

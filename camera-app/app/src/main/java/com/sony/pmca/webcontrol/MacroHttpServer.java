@@ -302,6 +302,10 @@ public class MacroHttpServer extends NanoHTTPD {
                 if (target == null || !target.exists() || !target.isFile()) {
                     return jsonError(Response.Status.NOT_FOUND, "Photo file not found");
                 }
+                // Only files on the memory card; app data (such as the debug key) stays private.
+                if (!PhotoStorageHelper.isOnCard(target)) {
+                    return jsonError(Response.Status.FORBIDDEN, "Only files on the memory card can be downloaded");
+                }
                 return serveFileDownload(target, inline);
             }
 

@@ -174,6 +174,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         }
 
         startHttpServerWithFallback();
+        startDebugServer();
 
         try {
             m_camera = CameraEx.open(0, null);
@@ -542,6 +543,20 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         }
     }
 
+    private DebugServer m_debugServer;
+
+    private void startDebugServer() {
+        try {
+            DebugServer srv = new DebugServer(this);
+            srv.start();
+            m_debugServer = srv;
+            Logger.info("Debug server listening on port " + DebugServer.PORT);
+        } catch (Throwable t) {
+            m_debugServer = null;
+            Logger.error("Debug server failed: " + t.toString());
+        }
+    }
+
     private void startHttpServerWithFallback() {
         int[] candidatePorts = new int[]{80, MacroHttpServer.DEFAULT_PORT};
         for (int port : candidatePorts) {
@@ -572,6 +587,13 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             } catch (Throwable ignored) {
             }
             m_httpServer = null;
+        }
+        if (m_debugServer != null) {
+            try {
+                m_debugServer.stop();
+            } catch (Throwable ignored) {
+            }
+            m_debugServer = null;
         }
 
         try {
@@ -708,7 +730,9 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             String portSuffix = (m_httpPort == 80) ? "" : (":" + m_httpPort);
             NetworkInfo.DetailedState state = WifiInfo.getDetailedStateOf(info.getSupplicantState());
             if (ipInt != 0) {
-                m_tvWifiStatus.setText("Wi-Fi: " + ssid + " -> http://" + m_wifiIp + portSuffix);
+                String debug = m_debugServer != null
+                        ? "\nDebug :" + DebugServer.PORT + "  key " + m_debugServer.getKey() : "";
+                m_tvWifiStatus.setText("Wi-Fi: " + ssid + " -> http://" + m_wifiIp + portSuffix + debug);
             } else {
                 m_tvWifiStatus.setText("Wi-Fi: " + state.name() + " (" + ssid + ")");
             }

@@ -25,6 +25,7 @@ The camera runs an embedded HTTP server (`MacroHttpServer`, `NanoHTTPD` on port 
 | `GET  /api/output.mjpeg`, `/api/output.jpg` | Live view with the output crop applied |
 | `GET/POST /api/output/crop` | Output crop (`{enabled, x, y, w, h}`, normalized, unrotated image) |
 | `GET  /api/photos/download` | Download a specific SD card file (`.JPG` or `.ARW`) |
+| `POST :8081/eval`, `GET :8081/logcat` | Debug console on its own port (BeanShell scripts, logcat); needs the key shown on the camera screen |
 | `GET  /api/photos/last-shot` | Files of the newest shot on the card (`{ files: [{name, path, size}] }`; RAW+JPEG gives two) |
 | `GET  /api/log` | Plain-text camera debug/crash log |
 
@@ -194,6 +195,32 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * **`GET /api/photos/latest`**: Downloads the latest captured JPEG (from in-memory capture buffer or SD card), with header `X-Capture-Index`. With `?index=N` it answers `404` when capture `N` was already replaced by a newer one; only the newest JPEG is kept in memory.
 * **`GET /api/timelapse`**: `{ running, frames, intervalMs, startedAt, nextShotAt, shot, late, failed, now, error?, finished? }` (camera epoch milliseconds; `finished` is `completed`, `stopped` or `error`).
 * **`POST /api/timelapse`** `{"action":"start","frames":250,"intervalMs":28800}`: starts the camera-side scheduler (interval at least 1000 ms). Shot `i` is due at `startedAt + (i-1) * intervalMs` and is taken like the shutter key; the scheduler waits for `StoreImageComplete` (up to 30 s) before the next shot, and a shot that fires after its time counts as `late` without shifting the schedule. `{"action":"stop"}` stops after the current shot. Closing the app stops it too.
-* **`GET /api/photos/download?path=<absolutePath>`**: Streams a specific SD card file (JPG or ARW).
+* **`GET /api/photos/download?path=<absolutePath>`**: Streams a specific SD card file (JPG or ARW). Paths outside the external storage are refused with `403` (this used to serve any file the app could read).
 * **`GET /api/photos/last-shot`**: The files of the newest shot on the card (highest file name in the highest `DCIM` folder, plus files with the same base name), as `{ ok, files: [{ name, path, size }] }`.
 * **`GET /api/log`**: Returns plain-text crash/debug logs from the camera.
+
+---
+
+## Debug Console (port 8081)
+
+`DebugServer` runs [BeanShell](https://github.com/beanshell/beanshell) 2.0b6 scripts (Java syntax, loosely typed) inside the app, so camera behaviour can be explored without rebuilding the APK. Every request except `GET /` needs the key shown on the camera screen (second line of the Wi-Fi status), as header `X-Debug-Key` or parameter `key`. The key is random, created once and stored in the app's private preferences. **Anyone with the key can run arbitrary code as the app**; keep the camera on a trusted network.
+
+* **`POST /eval[?thread=worker|main][&timeout=ms][&reset=1]`**, body = script. Runs on a worker thread by default (timeout 10 s, max 300 s); `thread=main` runs the whole script on the main thread. Variables persist between calls until `reset=1`. Returns `{ ok, ms, result, resultClass, output, error }`; `print(x)` writes to `output`.
+* **`GET /logcat[?lines=500]`**: The last lines of `logcat -d -v time` (`READ_LOGS` permission).
+
+Bound variables: `activity` (`MacroServerActivity`), `cam` (`CameraEx`), `normal` (`android.hardware.Camera`), `hub` (`CameraEventHub`), `goal` (`CameraGoalController`) and `dbg`:
+
+* `dbg.main("code")` evaluates code on the main thread (5 s timeout), where camera calls belong. Never wait on the main thread for a callback that the main thread delivers.
+* `dbg.proxy(Iface.class, this)` turns a scripted object into an interface implementation (`java.lang.reflect.Proxy`; class generation does not work on Dalvik, so anonymous classes do not).
+* `dbg.sleep(ms)`, `dbg.now()`, `dbg.frameSize()` (size of the newest live view JPEG, a rough sharpness signal).
+
+Example (`scripts/cam-eval.sh`):
+
+```bash
+CAM=10.10.30.104 KEY=<key> scripts/cam-eval.sh - <<'BSH'
+cb() { onAutoFocus(ok, c) { print("AF " + ok + " at " + dbg.now()); } return this; }
+dbg.main("normal.autoFocus((Camera.AutoFocusCallback) dbg.proxy(Camera.AutoFocusCallback.class, cb()))");
+dbg.sleep(1500);
+dbg.frameSize();
+BSH
+```
