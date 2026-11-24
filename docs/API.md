@@ -25,6 +25,7 @@ The camera runs an embedded HTTP server (`MacroHttpServer`, `NanoHTTPD` on port 
 | `GET  /api/output.mjpeg`, `/api/output.jpg` | Live view with the output crop applied |
 | `GET/POST /api/output/crop` | Output crop (`{enabled, x, y, w, h}`, normalized, unrotated image) |
 | `GET  /api/photos/download` | Download a specific SD card file (`.JPG` or `.ARW`) |
+| `GET  /api/photos/last-shot` | Files of the newest shot on the card (`{ files: [{name, path, size}] }`; RAW+JPEG gives two) |
 | `GET  /api/log` | Plain-text camera debug/crash log |
 
 ---
@@ -70,6 +71,8 @@ Sony `CameraEx` does not expose absolute setters for focus, aperture, shutter sp
 * **`setFocusPosition(targetPos[, tolerance])`**: Drives MF position using `startOneShotFocusDrive` until within `tolerance` (default `2`). Needs focus drive support; the `ILCE-7` has none (`getMaxFocusDriveSpeed()` is `0`) and fails with `Focus position unavailable`.
 * **`setFocusOffset(offset)`**: Sets focus to the last autofocus position plus `offset` steps, clamped to `±getMaxFocusShift()` (16 on the `ILCE-7`), with one `CameraEx.shiftFocusPosition(offset)` call. `shiftFocusPosition` is not a relative move: on the `ILCE-7` repeating `shiftFocusPosition(16)` leaves focus where the first call put it. Refused until an `autoFocusAt` has succeeded (calling `shiftFocusPosition` before any AF blocked the `ILCE-7` main thread); each successful `autoFocusAt` resets the offset to `0`. Returns `{ ready, offset, min, max, requested, accepted, atLimit }`.
 * **`shiftFocus(steps)`**: `setFocusOffset(currentOffset + steps)`.
+* **`getCaptureSettings()`**: Still image quality from the body's parameters: `{ format, formatValues, jpegQuality, jpegQualityValues, imageSize, imageSizeValues, aspect, aspectValues, pictureSize }`. Keys: `storage-fmt`, `jpeg-quality`, `image-size`, `image-aspect`, `picture-size`. `ILCE-7` values: format `jpeg` / `raw` / `rawjpeg`, jpegQuality `95` / `50` / `25` (its three menu entries Extra fine, Fine, Standard), imageSize `large` / `midium` / `small` (Sony's spelling), aspect `3:2` / `16:9`. There is no uncompressed RAW value on the `ILCE-7`.
+* **`setCaptureSettings({ format?, jpegQuality?, imageSize?, aspect? })`**: Writes the given fields in one partial parameter write after checking each against the body's `-values` list (an unknown value fails with the list), then returns `getCaptureSettings()` as read back. Also published as state `capture` and event `CaptureSettings`, which the camera's own menu changes trigger too.
 * State key `focusShift` (`{ ready, offset, min, max }`) and the `FocusShift` event carry the current offset.
 * **`setAperture(fValue100)`**: Steps `incrementAperture` / `decrementAperture` until reaching `fValue100` (e.g., `800` for `F8.0`, clamped to `currentAvailableMin`..`currentAvailableMax`).
 * **`setShutterSpeed(numerator, denominator)`**: Steps `incrementShutterSpeed` / `decrementShutterSpeed` until reaching `numerator / denominator` seconds (e.g., `[1, 125]` for `1/125s`).
@@ -174,7 +177,8 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * `Timelapse` — same object as `GET /api/timelapse`
 * `FocusShift` — `{ ready, offset, min, max }`
 * `OutputCrop` — same object as `GET /api/output/crop`
-* `StoreImageComplete` — `{ status, DirectoryName, FileName, DirectoryNo, FileNo, MediaId }`
+* `StoreImageComplete` — `{ status, DirectoryName, FileName, DirectoryNo, FileNo, MediaId, files }`, where `files` lists the stored files of the shot as `[{ name, path, size }]` (`DCIM/<DirectoryName>/<base>.ARW` and `.JPG`, whichever exist; empty when the names could not be resolved, then use `/api/photos/last-shot`)
+* `CaptureSettings` — same object as `highlevel.getCaptureSettings()`
 * `SettingChanged` — `{ types: [...] }`
 * `EquipmentChange` — `{ deviceType, status }`
 * `Error` — `{ error }`
@@ -191,4 +195,5 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 * **`GET /api/timelapse`**: `{ running, frames, intervalMs, startedAt, nextShotAt, shot, late, failed, now, error?, finished? }` (camera epoch milliseconds; `finished` is `completed`, `stopped` or `error`).
 * **`POST /api/timelapse`** `{"action":"start","frames":250,"intervalMs":28800}`: starts the camera-side scheduler (interval at least 1000 ms). Shot `i` is due at `startedAt + (i-1) * intervalMs` and is taken like the shutter key; the scheduler waits for `StoreImageComplete` (up to 30 s) before the next shot, and a shot that fires after its time counts as `late` without shifting the schedule. `{"action":"stop"}` stops after the current shot. Closing the app stops it too.
 * **`GET /api/photos/download?path=<absolutePath>`**: Streams a specific SD card file (JPG or ARW).
+* **`GET /api/photos/last-shot`**: The files of the newest shot on the card (highest file name in the highest `DCIM` folder, plus files with the same base name), as `{ ok, files: [{ name, path, size }] }`.
 * **`GET /api/log`**: Returns plain-text crash/debug logs from the camera.

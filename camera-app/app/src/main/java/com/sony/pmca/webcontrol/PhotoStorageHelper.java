@@ -163,6 +163,77 @@ public final class PhotoStorageHelper {
         return null;
     }
 
+    /** Extensions one still shot can be stored with, RAW first. */
+    private static final String[] SHOT_EXTENSIONS = {".ARW", ".JPG"};
+
+    /**
+     * The files of one stored shot as [{name, path, size}]: every DCIM/{@code dirName}/base.ext
+     * that exists, where base is {@code fileName} without its extension. RAW+JPEG gives two.
+     * Only checks a few names (no directory listing), so it is cheap on the main thread.
+     */
+    public static JSONArray resolveStoredFiles(String dirName, String fileName) {
+        JSONArray out = new JSONArray();
+        if (fileName == null || fileName.trim().isEmpty()) {
+            return out;
+        }
+        try {
+            File dir = resolveSdDir(dirName);
+            String name = new File(fileName.trim()).getName();
+            int dot = name.lastIndexOf('.');
+            String base = dot > 0 ? name.substring(0, dot) : name;
+            for (String ext : SHOT_EXTENSIONS) {
+                File f = new File(dir, base + ext);
+                if (f.isFile()) {
+                    out.put(fileJson(f));
+                }
+            }
+        } catch (Throwable t) {
+            Logger.error("resolveStoredFiles error: " + t.toString());
+        }
+        return out;
+    }
+
+    /** The files of the newest shot on the card (same base name in the newest folder). */
+    public static JSONArray getLatestShotFiles() {
+        JSONArray out = new JSONArray();
+        File latest = getLatestPhotoFile();
+        if (latest == null) {
+            return out;
+        }
+        String name = latest.getName();
+        int dot = name.lastIndexOf('.');
+        String base = dot > 0 ? name.substring(0, dot) : name;
+        File[] entries = latest.getParentFile() != null ? latest.getParentFile().listFiles() : null;
+        if (entries == null) {
+            return out;
+        }
+        List<File> shot = new ArrayList<File>();
+        for (File f : entries) {
+            String n = f.getName();
+            int d = n.lastIndexOf('.');
+            if (isPhotoFile(f) && d > 0 && n.substring(0, d).equalsIgnoreCase(base)) {
+                shot.add(f);
+            }
+        }
+        Collections.sort(shot, NAME_DESC);
+        Collections.reverse(shot);
+        for (File f : shot) {
+            try {
+                out.put(fileJson(f));
+            } catch (Throwable ignored) {
+            }
+        }
+        return out;
+    }
+
+    private static JSONObject fileJson(File f) throws Exception {
+        JSONObject item = new JSONObject();
+        item.put("name", f.getName());
+        item.put("path", f.getAbsolutePath().replace("\\", "/"));
+        item.put("size", f.length());
+        return item;
+    }
+
     public static String getCrashLogText() {
         Logger.flush();
         File f = Logger.getFile();

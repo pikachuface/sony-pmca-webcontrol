@@ -17,11 +17,19 @@ controlled from any browser on the LAN.
   **[−] knob [+]** with end stops at ±16: click the live view to AF, then turn the knob with the
   scroll wheel, a vertical drag or the arrow keys. Each detent moves the offset by **Step size**
   (default 4), or by 1 while **Shift** is held; **Back to AF** returns to offset 0.
+* **Modes: Webcam, Photo, Timelapse.** Webcam shows the MJPEG stream URLs (full frame and cropped
+  output) for OBS, VLC or ffmpeg and saves nothing. Photo stores each shot on the SD card and, with
+  **Save to: SD + PC**, downloads the stored files in full quality (RAW, JPEG or both). Timelapse runs
+  the schedule below. Each shooting mode remembers its own quality and restores it when entered.
+* **Quality settings**: RAW / JPEG / RAW+JPEG, JPEG quality (Extra fine, Fine, Standard), size and
+  aspect, written to the camera's `storage-fmt`, `jpeg-quality`, `image-size` and `image-aspect`. The
+  best the ILCE-7 offers is RAW+JPEG, Extra fine, L 3:2 (6000×4000); it has no uncompressed RAW.
 * **Timelapse** that runs on the camera: enter the shooting time, video fps and video length, and the
   panel shows the number of frames, the interval, the end time and the size on the card. The camera
   shoots on schedule and stores to the SD card even with the browser closed; the open tab can also
-  save each frame's JPEG to the PC, with a warning when Wi-Fi (measured 2.3 MB/s on the ILCE-7) cannot
-  keep up with the interval.
+  download each frame's JPEG from the card to the PC. When Wi-Fi (measured 2.3 MB/s on the ILCE-7) is
+  slower than the interval, downloads queue up and finish after the shoot; no frame is dropped.
+  Timelapse mode defaults to RAW+JPEG so the PC gets JPEGs.
 * **Output crop**: ✂ Crop draws a rectangle with four side handles over the live view;
   `/api/output.mjpeg` then streams only that region (for OBS or ffmpeg) while the web view still
   shows the whole frame. ▣ Frame zooms the view to the crop. The rule-of-thirds grid follows the crop.

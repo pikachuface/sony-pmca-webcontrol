@@ -278,6 +278,13 @@ public class MacroHttpServer extends NanoHTTPD {
                 return jsonError(Response.Status.NOT_FOUND, "No captured photo available yet");
             }
 
+            if ("/api/photos/last-shot".equals(uri)) {
+                JSONObject out = new JSONObject();
+                out.put("ok", true);
+                out.put("files", PhotoStorageHelper.getLatestShotFiles());
+                return jsonOk(out.toString());
+            }
+
             if ("/api/photos".equals(uri)) {
                 int limit = parseInt(params.get("limit"), 100);
                 String dir = params.get("dir");

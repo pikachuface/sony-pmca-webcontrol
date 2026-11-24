@@ -3,6 +3,9 @@ import {
   CameraClient,
   type CameraEvent,
   type CameraState,
+  type CaptureSettings,
+  type CaptureSettingsPatch,
+  type StoredFile,
   getDefaultCameraUrl,
 } from './api/cameraClient';
 import {
@@ -12,17 +15,76 @@ import {
   saveBlobToDirectory,
   triggerBrowserDownload,
 } from './api/localSave';
-import { AutoSavePanel } from './components/AutoSavePanel';
+import { AutoSavePanel, type PcFiles, type SaveDest } from './components/AutoSavePanel';
 import { EventsPanel, type LoggedCameraEvent } from './components/EventsPanel';
 import { ExposureControl } from './components/ExposureControl';
 import { FocusControl } from './components/FocusControl';
 import { LiveViewPanel } from './components/LiveViewPanel';
 import { PhotoBrowser } from './components/PhotoBrowser';
 import { PhotoPreviewModal } from './components/PhotoPreviewModal';
+import { QualityPanel } from './components/QualityPanel';
 import { RpcInspector } from './components/RpcInspector';
 import { TimelapsePanel } from './components/TimelapsePanel';
+import { WebcamPanel } from './components/WebcamPanel';
 
 type TabKey = 'control' | 'photos' | 'events' | 'rpc';
+
+/** Webcam: stream only. Photo: shots at the chosen quality. Timelapse: scheduled shots. */
+type Mode = 'webcam' | 'photo' | 'timelapse';
+type ShootingMode = Exclude<Mode, 'webcam'>;
+const MODE_LABELS: Record<Mode, string> = { webcam: 'Webcam', photo: 'Photo', timelapse: 'Timelapse' };
+const MODE_HINTS: Record<Mode, string> = {
+  webcam: 'Live view stream for OBS, VLC or ffmpeg; nothing is saved',
+  photo: 'Photos at the chosen quality, to the SD card and optionally the PC',
+  timelapse: 'Scheduled photos with JPEGs for the video',
+};
+
+/** Quality remembered per shooting mode and applied when the mode is entered. */
+type QualityProfiles = Partial<Record<ShootingMode, CaptureSettingsPatch>>;
+const PROFILES_KEY = 'pmca_quality_profiles';
+// A timelapse needs JPEGs for the video; RAW is kept for grading.
+const DEFAULT_PROFILES: QualityProfiles = { timelapse: { format: 'rawjpeg', jpegQuality: '95' } };
+
+function loadStored<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  try {
+    const v = localStorage.getItem(key);
+    if (v && (allowed as readonly string[]).includes(v)) return v as T;
+  } catch {}
+  return fallback;
+}
+
+function storeValue(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {}
+}
+
+function loadProfiles(): QualityProfiles {
+  try {
+    const raw = localStorage.getItem(PROFILES_KEY);
+    if (raw) return JSON.parse(raw) as QualityProfiles;
+  } catch {}
+  return DEFAULT_PROFILES;
+}
+
+function patchOf(s: CaptureSettings): CaptureSettingsPatch {
+  const out: CaptureSettingsPatch = {};
+  if (s.format) out.format = s.format;
+  if (s.jpegQuality) out.jpegQuality = s.jpegQuality;
+  if (s.imageSize) out.imageSize = s.imageSize;
+  if (s.aspect) out.aspect = s.aspect;
+  return out;
+}
+
+function fileExt(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function isJpegFile(f: StoredFile): boolean {
+  const ext = fileExt(f.name);
+  return ext === 'jpg' || ext === 'jpeg';
+}
 
 function applyEventsToState(
   prev: CameraState | null,
@@ -76,6 +138,12 @@ function applyEventsToState(
       case 'StoreImageComplete':
         next.lastStoreImage = d as CameraState['lastStoreImage'];
         break;
+      case 'CaptureSettings':
+        next.capture = d as CameraState['capture'];
+        break;
+      case 'OutputCrop':
+        next.outputCrop = d as unknown as CameraState['outputCrop'];
+        break;
       case 'SettingChanged':
       case 'EquipmentChange':
         needFullRefresh = true;
@@ -121,24 +189,41 @@ export function App() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [tab, setTab] = useState<TabKey>('control');
 
-  const [autoSaveEnabled, setAutoSaveEnabled] = useState<boolean>(() => {
+  const [mode, setModeState] = useState<Mode>(() => loadStored('pmca_mode', ['webcam', 'photo', 'timelapse'] as const, 'photo'));
+  const setMode = useCallback((m: Mode) => {
+    setModeState(m);
+    storeValue('pmca_mode', m);
+  }, []);
+  const [saveDest, setSaveDestState] = useState<SaveDest>(() => {
+    let legacy: SaveDest = 'sd';
     try {
-      return localStorage.getItem('pmca_autosave_enabled') === 'true';
-    } catch {
-      return false;
-    }
+      if (localStorage.getItem('pmca_autosave_enabled') === 'true') legacy = 'sdpc';
+    } catch {}
+    return loadStored('pmca_save_dest', ['sd', 'sdpc'] as const, legacy);
   });
+  const setSaveDest = useCallback((d: SaveDest) => {
+    setSaveDestState(d);
+    storeValue('pmca_save_dest', d);
+  }, []);
+  const [pcFiles, setPcFilesState] = useState<PcFiles>(() => loadStored('pmca_pc_files', ['all', 'jpeg', 'raw'] as const, 'all'));
+  const setPcFiles = useCallback((f: PcFiles) => {
+    setPcFilesState(f);
+    storeValue('pmca_pc_files', f);
+  }, []);
+  const [profiles, setProfiles] = useState<QualityProfiles>(loadProfiles);
+  const [qualityBusy, setQualityBusy] = useState(false);
   const [saveDirName, setSaveDirName] = useState<string | null>(null);
   const [savedCount, setSavedCount] = useState<number>(0);
   const [lastSavedFile, setLastSavedFile] = useState<string | null>(null);
   const [savingStatus, setSavingStatus] = useState<string | null>(null);
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; name: string } | null>(null);
-  /** Size of the last captured JPEG (Jpeg event), for timelapse transfer estimates. */
-  const [lastJpegBytes, setLastJpegBytes] = useState<number | null>(null);
+  /** Size of the last stored file per type ('arw', 'jpg'), for size and transfer estimates. */
+  const [lastSizes, setLastSizes] = useState<Record<string, number>>({});
   /** Measured photo download speed (bytes/s), smoothed; null until the first download. */
   const [transferBps, setTransferBps] = useState<number | null>(null);
   const [timelapseSaved, setTimelapseSaved] = useState(0);
-  const [timelapseSkipped, setTimelapseSkipped] = useState(0);
+  /** Downloads waiting in the save queue. */
+  const [queued, setQueued] = useState(0);
   /** This tab saves the running timelapse's frames to the PC. */
   const [timelapsePc, setTimelapsePc] = useState(false);
 
@@ -160,8 +245,9 @@ export function App() {
     };
   }, []);
 
-  const autoSaveRef = useRef<boolean>(false);
-  autoSaveRef.current = autoSaveEnabled;
+  // Read by the event handler, which must not be recreated on every change.
+  const toPcRef = useRef<{ mode: Mode; dest: SaveDest; files: PcFiles }>({ mode, dest: saveDest, files: pcFiles });
+  toPcRef.current = { mode, dest: saveDest, files: pcFiles };
 
   const refreshState = useCallback(async (): Promise<boolean> => {
     try {
@@ -199,15 +285,11 @@ export function App() {
     while (saveQueueRef.current.length > 0) {
       const task = saveQueueRef.current.shift();
       if (!task) break;
+      setQueued(saveQueueRef.current.length);
       setSavingStatus(typeof task.name === 'string' ? `Saving ${task.name}...` : 'Saving photo...');
       try {
         const started = performance.now();
         const res = await fetch(task.url);
-        if (res.status === 404 && task.series) {
-          // The camera already replaced this frame with a newer one: the series outran the link.
-          setTimelapseSkipped((n) => n + 1);
-          continue;
-        }
         if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
         const blob = await res.blob();
         const seconds = (performance.now() - started) / 1000;
@@ -240,6 +322,7 @@ export function App() {
     (task: { name: string | (() => string); url: string; series?: boolean }): Promise<void> => {
       const promise = new Promise<void>((resolve) => {
         saveQueueRef.current.push({ ...task, resolve });
+        setQueued(saveQueueRef.current.length);
         void processSaveQueue();
       });
       activeSavePromiseRef.current = promise;
@@ -258,10 +341,6 @@ export function App() {
       const handle = await pickSaveDirectory();
       dirHandleRef.current = handle;
       setSaveDirName(handle.name);
-      setAutoSaveEnabled(true);
-      try {
-        localStorage.setItem('pmca_autosave_enabled', 'true');
-      } catch {}
       setErrorMsg(null);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
@@ -269,46 +348,68 @@ export function App() {
     }
   }, []);
 
-  const nextCaptureFileName = useCallback(() => {
-    const d = new Date();
-    const pad = (n: number) => String(n).padStart(2, '0');
-    return `capture_${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.jpg`;
-  }, []);
-
-  const handleCaptureEvent = useCallback(
-    (ev: CameraEvent) => {
-      if (ev.type !== 'Jpeg') return;
-      const data = ev.data ?? {};
-      if (typeof data.size === 'number') setLastJpegBytes(data.size);
-      const captureIndex = typeof data.captureIndex === 'number' ? data.captureIndex : undefined;
-
-      const dedupKey = `jpeg_${ev.seq}`;
+  /**
+   * A shot was stored on the card. Records its file sizes and, when this tab saves to the PC,
+   * queues the full-quality files from the card: the JPEG for a timelapse series, or the
+   * chosen types (camera file names) in Photo mode.
+   */
+  const handleStoredEvent = useCallback(
+    async (ev: CameraEvent) => {
+      if (ev.type !== 'StoreImageComplete') return;
+      const dedupKey = `store_${ev.seq}`;
       if (handledFilesRef.current.has(dedupKey)) return;
       if (handledFilesRef.current.size > 500) {
         handledFilesRef.current.clear();
       }
       handledFilesRef.current.add(dedupKey);
 
+      const data = ev.data ?? {};
+      let files: StoredFile[] = Array.isArray(data.files) ? (data.files as StoredFile[]) : [];
+      if (files.length === 0) {
+        // The camera could not resolve the file names: take the newest shot on the card.
+        try {
+          files = await client.lastShotFiles();
+        } catch {
+          files = [];
+        }
+      }
+      if (files.length > 0) {
+        setLastSizes((prev) => {
+          const next = { ...prev };
+          for (const f of files) {
+            const ext = fileExt(f.name) === 'jpeg' ? 'jpg' : fileExt(f.name);
+            if (f.size > 0) next[ext] = f.size;
+          }
+          return next;
+        });
+      }
+
+      const fresh = files.filter((f) => !handledFilesRef.current.has(`file_${f.path}`));
+      const take = (f: StoredFile) => handledFilesRef.current.add(`file_${f.path}`);
+
       const series = captureSeriesRef.current;
       if (series) {
+        const jpg = fresh.find(isJpegFile);
+        if (!jpg) return;
+        take(jpg);
         void queueSavePhoto({
           name: () => nextSeriesFileName(series),
-          url: client.latestPhotoUrl(Date.now(), false, captureIndex),
+          url: client.photoDownloadUrl(jpg.path),
           series: true,
         });
         return;
       }
 
-      if (!autoSaveRef.current) {
-        return;
+      const pc = toPcRef.current;
+      if (pc.mode !== 'photo' || pc.dest !== 'sdpc') return;
+      for (const f of fresh) {
+        const jpeg = isJpegFile(f);
+        if ((pc.files === 'jpeg' && !jpeg) || (pc.files === 'raw' && jpeg)) continue;
+        take(f);
+        void queueSavePhoto({ name: f.name, url: client.photoDownloadUrl(f.path) });
       }
-
-      void queueSavePhoto({
-        name: nextCaptureFileName(),
-        url: client.latestPhotoUrl(Date.now(), false, captureIndex),
-      });
     },
-    [client, nextCaptureFileName, queueSavePhoto],
+    [client, queueSavePhoto],
   );
 
   const eventsCidRef = useRef<string>(getEventsClientId());
@@ -326,7 +427,6 @@ export function App() {
         : null;
       setTimelapsePc(saveToPc);
       setTimelapseSaved(0);
-      setTimelapseSkipped(0);
       try {
         const tl = await client.startTimelapse(frames, intervalMs);
         setState((prev) => (prev ? { ...prev, timelapse: tl } : prev));
@@ -350,8 +450,61 @@ export function App() {
     if (!timelapseRunning) {
       captureSeriesRef.current = null;
       setTimelapsePc(false);
+    } else {
+      // A run started elsewhere (or before a reload) shows up in Timelapse mode.
+      setMode('timelapse');
     }
-  }, [timelapseRunning]);
+  }, [timelapseRunning, setMode]);
+
+  /** Writes quality to the camera; by default remembers the result for the current mode. */
+  const applyQuality = useCallback(
+    async (patch: CaptureSettingsPatch, remember = true) => {
+      setQualityBusy(true);
+      try {
+        const s = await client.setCaptureSettings(patch);
+        setState((prev) => (prev ? { ...prev, capture: s } : prev));
+        const m = toPcRef.current.mode;
+        if (remember && m !== 'webcam') {
+          setProfiles((prev) => {
+            const next = { ...prev, [m]: patchOf(s) };
+            storeValue(PROFILES_KEY, JSON.stringify(next));
+            return next;
+          });
+        }
+      } catch (err) {
+        setErrorMsg(err instanceof Error ? err.message : String(err));
+      } finally {
+        setQualityBusy(false);
+      }
+    },
+    [client],
+  );
+
+  // Entering Photo or Timelapse mode restores that mode's quality (once per mode and camera).
+  const capture = state?.capture;
+  const appliedProfileRef = useRef('');
+  useEffect(() => {
+    if (!connected || !capture?.format || mode === 'webcam' || timelapseRunning) return;
+    const profile = profiles[mode];
+    if (!profile) return;
+    const key = `${activeUrl}|${mode}`;
+    if (appliedProfileRef.current === key) return;
+    appliedProfileRef.current = key;
+    const differs = (Object.keys(profile) as (keyof CaptureSettingsPatch)[]).some(
+      (k) => profile[k] !== undefined && capture[k] !== profile[k],
+    );
+    if (!differs) return;
+    // Keep what the camera had for the other mode, so switching back restores it.
+    const other: ShootingMode = mode === 'photo' ? 'timelapse' : 'photo';
+    if (!profiles[other]) {
+      setProfiles((prev) => {
+        const next = { ...prev, [other]: patchOf(capture) };
+        storeValue(PROFILES_KEY, JSON.stringify(next));
+        return next;
+      });
+    }
+    void applyQuality(profile, false);
+  }, [connected, capture, mode, profiles, timelapseRunning, activeUrl, applyQuality]);
 
   useEffect(() => {
     const onPageHide = () => {
@@ -396,8 +549,8 @@ export function App() {
         return applied.next;
       });
       for (const ev of incoming) {
-        if (ev.type === 'Jpeg' || ev.type === 'StoreImageComplete') {
-          handleCaptureEvent(ev);
+        if (ev.type === 'StoreImageComplete') {
+          void handleStoredEvent(ev);
         }
       }
       if (needFullRefresh) {
@@ -458,7 +611,7 @@ export function App() {
       }
       client.closeEventsStream(eventsCidRef.current);
     };
-  }, [client, handleCaptureEvent, refreshState, manualDisconnected]);
+  }, [client, handleStoredEvent, refreshState, manualDisconnected]);
 
   const handleConnectSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -614,6 +767,24 @@ export function App() {
               onError={setErrorMsg}
             />
             <div className="side-column">
+              <div className="mode-bar" role="group" aria-label="Mode">
+                {(Object.keys(MODE_LABELS) as Mode[]).map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    className={`mode-btn ${mode === m ? 'is-active' : ''}`}
+                    aria-pressed={mode === m}
+                    title={MODE_HINTS[m]}
+                    disabled={timelapseRunning && m !== 'timelapse'}
+                    onClick={() => setMode(m)}
+                  >
+                    {MODE_LABELS[m]}
+                  </button>
+                ))}
+              </div>
+              {mode === 'webcam' && (
+                <WebcamPanel client={client} connected={connected} cropEnabled={state?.outputCrop?.enabled === true} />
+              )}
               <ExposureControl
                 client={client}
                 state={state}
@@ -626,40 +797,58 @@ export function App() {
                 focusShift={state?.focusShift}
                 onError={setErrorMsg}
               />
-              <TimelapsePanel
-                connected={connected}
-                timelapse={state?.timelapse}
-                lastJpegBytes={lastJpegBytes}
-                transferBps={transferBps}
-                pcSaved={timelapseSaved}
-                pcSkipped={timelapseSkipped}
-                pcSeriesActive={timelapsePc}
-                saveTarget={saveDirName ? `folder ${saveDirName}` : 'browser downloads'}
-                onStart={startTimelapse}
-                onStop={stopTimelapse}
-                onError={setErrorMsg}
-              />
-              <AutoSavePanel
-                enabled={autoSaveEnabled}
-                onToggle={(next) => {
-                  if (next && isDirectoryPickerSupported() && !dirHandleRef.current) {
-                    void handlePickDirectory();
-                  } else {
-                    setAutoSaveEnabled(next);
-                    try {
-                      localStorage.setItem('pmca_autosave_enabled', String(next));
-                    } catch {}
-                  }
-                }}
-                dirName={saveDirName}
-                onPickDirectory={() => void handlePickDirectory()}
-                savedCount={savedCount}
-                lastSavedFile={lastSavedFile}
-                savingStatus={savingStatus}
-                connected={connected}
-                getLatestPhotoUrl={(inline = false) => client.latestPhotoUrl(Date.now(), inline)}
-                onOpenSavedPhoto={handleOpenSavedPhoto}
-              />
+              {mode !== 'webcam' && (
+                <QualityPanel
+                  connected={connected}
+                  settings={state?.capture}
+                  modeLabel={MODE_LABELS[mode]}
+                  lastSizes={lastSizes}
+                  busy={qualityBusy}
+                  locked={timelapseRunning}
+                  onChange={(patch) => void applyQuality(patch)}
+                />
+              )}
+              {mode === 'timelapse' && (
+                <TimelapsePanel
+                  connected={connected}
+                  timelapse={state?.timelapse}
+                  format={state?.capture?.format}
+                  jpegBytes={lastSizes.jpg ?? null}
+                  rawBytes={lastSizes.arw ?? null}
+                  transferBps={transferBps}
+                  pcSaved={timelapseSaved}
+                  pcQueued={timelapsePc ? queued : 0}
+                  pcSeriesActive={timelapsePc}
+                  saveTarget={saveDirName ? `folder ${saveDirName}` : 'browser downloads'}
+                  onStart={startTimelapse}
+                  onStop={stopTimelapse}
+                  onUseJpeg={() => void applyQuality({ format: 'rawjpeg' })}
+                  onError={setErrorMsg}
+                />
+              )}
+              {mode === 'photo' && (
+                <AutoSavePanel
+                  dest={saveDest}
+                  onDestChange={(d) => {
+                    setSaveDest(d);
+                    if (d === 'sdpc' && isDirectoryPickerSupported() && !dirHandleRef.current) {
+                      void handlePickDirectory();
+                    }
+                  }}
+                  pcFiles={pcFiles}
+                  onPcFilesChange={setPcFiles}
+                  format={state?.capture?.format}
+                  dirName={saveDirName}
+                  onPickDirectory={() => void handlePickDirectory()}
+                  savedCount={savedCount}
+                  queued={queued}
+                  lastSavedFile={lastSavedFile}
+                  savingStatus={savingStatus}
+                  connected={connected}
+                  getLatestPhotoUrl={(inline = false) => client.latestPhotoUrl(Date.now(), inline)}
+                  onOpenSavedPhoto={handleOpenSavedPhoto}
+                />
+              )}
             </div>
           </div>
         )}

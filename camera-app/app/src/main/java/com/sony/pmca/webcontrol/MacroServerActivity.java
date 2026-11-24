@@ -79,6 +79,27 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         return m_rpc;
     }
 
+    private String m_lastCaptureSettings;
+
+    /**
+     * Stores the still image quality settings as state "capture" and emits a CaptureSettings
+     * event when they changed (from the web UI or the camera's own menu).
+     */
+    public void publishCaptureSettings(JSONObject settings) {
+        if (settings == null || settings.length() == 0) {
+            return;
+        }
+        String text = settings.toString();
+        synchronized (this) {
+            if (text.equals(m_lastCaptureSettings)) {
+                return;
+            }
+            m_lastCaptureSettings = text;
+        }
+        m_eventHub.setState("capture", settings);
+        m_eventHub.emit("CaptureSettings", settings);
+    }
+
     public CameraEx getCameraEx() {
         return m_camera;
     }
@@ -248,6 +269,8 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
                             data.put("DirectoryNo", info.DirectoryNo);
                             data.put("FileNo", info.FileNo);
                             data.put("MediaId", info.MediaId);
+                            // RAW+JPEG stores DSCnnnnn.ARW and DSCnnnnn.JPG; list what exists.
+                            data.put("files", PhotoStorageHelper.resolveStoredFiles(info.DirectoryName, info.FileName));
                         }
                     } catch (Throwable ignored) {
                     }
@@ -468,6 +491,10 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
                         }
                     } catch (Throwable ignored) {
                     }
+                    try {
+                        publishCaptureSettings(CaptureSettings.toJson(m_camera.getNormalCamera().getParameters()));
+                    } catch (Throwable ignored) {
+                    }
                     JSONObject data = new JSONObject();
                     try {
                         data.put("types", RpcDispatcher.toJsonValue(types));
@@ -621,6 +648,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         m_eventHub.setState("lens", buildLensInfoJson());
         try {
             Camera.Parameters params = m_camera.getNormalCamera().getParameters();
+            publishCaptureSettings(CaptureSettings.toJson(params));
             CameraEx.ParametersModifier mod = m_camera.createParametersModifier(params);
             try {
                 m_aperture = mod.getAperture();

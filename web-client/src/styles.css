@@ -1193,12 +1193,6 @@ body {
   width: auto;
 }
 
-.input-sm.input-xs {
-  width: 52px;
-  padding: 2px 5px;
-  font-size: 0.78rem;
-}
-
 .timelapse-grid {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1253,4 +1247,120 @@ body {
   height: 100%;
   background: var(--ok);
   transition: width 0.3s ease-out;
+}
+
+/* --- Mode bar (Webcam / Photo / Timelapse) --- */
+
+.mode-bar {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius);
+}
+
+.mode-btn {
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 7px 8px;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mode-btn:hover:not(:disabled) {
+  color: var(--text);
+  background: #21262d;
+}
+
+.mode-btn.is-active {
+  color: var(--text);
+  border-color: var(--accent);
+  background: rgba(47, 129, 247, 0.2);
+}
+
+.mode-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* --- Segmented choices (quality, save target) --- */
+
+.quality-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  min-width: 0;
+}
+
+.quality-label {
+  flex: 0 0 56px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.segmented-btn {
+  background: #21262d;
+  color: var(--text);
+  border: 0;
+  border-right: 1px solid var(--panel-border);
+  padding: 4px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.segmented-btn:last-child {
+  border-right: 0;
+}
+
+.segmented-btn:hover:not(:disabled) {
+  background: #30363d;
+}
+
+.segmented-btn.is-active {
+  background: rgba(47, 129, 247, 0.3);
+  color: #fff;
+}
+
+.segmented-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.quality-note {
+  margin: 4px 0 0;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+/* --- Webcam stream URLs --- */
+
+.webcam-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  min-width: 0;
+}
+
+.webcam-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  padding: 4px 8px;
 }

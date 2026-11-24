@@ -179,7 +179,59 @@ public class CameraGoalController {
             }
             return setFocusOffset(args.getInt(0), args.length() >= 2 && args.getBoolean(1));
         }
+        if ("getCaptureSettings".equals(method)) {
+            return getCaptureSettings();
+        }
+        if ("setCaptureSettings".equals(method)) {
+            if (args == null || args.length() < 1 || args.optJSONObject(0) == null) {
+                throw new IllegalArgumentException(
+                        "setCaptureSettings requires ({format?, jpegQuality?, imageSize?, aspect?})");
+            }
+            return setCaptureSettings(args.getJSONObject(0));
+        }
         throw new NoSuchMethodException("Unknown highlevel method: " + method);
+    }
+
+    // --- Still Image Quality ---
+
+    /** Reads format, JPEG quality, size and aspect (with allowed values) and publishes them. */
+    public JSONObject getCaptureSettings() throws Exception {
+        JSONObject s = m_activity.runOnMainSync(new Callable<JSONObject>() {
+            @Override
+            public JSONObject call() {
+                CameraEx cam = m_activity.getCameraEx();
+                if (cam == null) {
+                    throw new IllegalStateException("Camera not initialized");
+                }
+                return CaptureSettings.toJson(cam.getNormalCamera().getParameters());
+            }
+        }, MacroServerActivity.MAIN_THREAD_TIMEOUT_MS);
+        m_activity.publishCaptureSettings(s);
+        return s;
+    }
+
+    /**
+     * Writes the given quality fields in one partial parameter write and returns the settings
+     * read back from the body, which is what the camera actually accepted.
+     */
+    private JSONObject setCaptureSettings(final JSONObject want) throws Exception {
+        JSONObject s = m_activity.runOnMainSync(new Callable<JSONObject>() {
+            @Override
+            public JSONObject call() throws Exception {
+                CameraEx cam = m_activity.getCameraEx();
+                if (cam == null) {
+                    throw new IllegalStateException("Camera not initialized");
+                }
+                Camera normal = cam.getNormalCamera();
+                Camera.Parameters out = cam.createEmptyParameters();
+                if (CaptureSettings.apply(normal.getParameters(), out, want) > 0) {
+                    normal.setParameters(out);
+                }
+                return CaptureSettings.toJson(normal.getParameters());
+            }
+        }, MacroServerActivity.MAIN_THREAD_TIMEOUT_MS);
+        m_activity.publishCaptureSettings(s);
+        return s;
     }
 
     // --- Focus Offset From The AF Point ---

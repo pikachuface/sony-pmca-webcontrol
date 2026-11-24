@@ -1,20 +1,27 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { TimelapseState } from '../api/cameraClient';
+import { formatLabel, hasJpeg, hasRaw } from './QualityPanel';
 
 interface TimelapsePanelProps {
   connected: boolean;
   timelapse?: TimelapseState;
-  /** Size of the last captured JPEG, which is what the PC receives per frame. */
-  lastJpegBytes: number | null;
+  /** Camera storage format (raw, jpeg, rawjpeg). */
+  format?: string;
+  /** Last stored file sizes from the card; the PC receives the JPEG of each frame. */
+  jpegBytes: number | null;
+  rawBytes: number | null;
   /** Measured download speed in bytes/s, or null before any download. */
   transferBps: number | null;
   pcSaved: number;
-  pcSkipped: number;
+  /** Frames stored on the card and still waiting for their download. */
+  pcQueued: number;
   /** This tab is saving the running timelapse's frames to the PC. */
   pcSeriesActive: boolean;
   saveTarget: string;
   onStart: (frames: number, intervalMs: number, saveToPc: boolean) => Promise<void>;
   onStop: () => Promise<void>;
+  /** Switches the camera to a format that also stores JPEGs. */
+  onUseJpeg: () => void;
   onError: (msg: string) => void;
 }
 
@@ -23,7 +30,6 @@ interface Inputs {
   minutes: string;
   fps: string;
   videoSeconds: string;
-  photoMB: string;
   saveToPc: boolean;
 }
 
@@ -34,13 +40,13 @@ const MIN_INTERVAL_S = 1;
 const TIGHT_INTERVAL_S = 3;
 /** Wi-Fi photo download speed measured on the ILCE-7 (25 MB ARW in 11 s), until this tab measures its own. */
 const MEASURED_BPS = 2.28e6;
+/** ILCE-7 ARW size as measured, until a shot in this session reports its own. */
+const MEASURED_RAW_BYTES = 25e6;
 const DEFAULT_INPUTS: Inputs = {
   hours: '2',
   minutes: '0',
   fps: '25',
   videoSeconds: '10',
-  // ILCE-7 RAW (ARW) as measured; JPEG-only shooting is smaller.
-  photoMB: '25',
   saveToPc: false,
 };
 
@@ -85,19 +91,22 @@ function clockAt(msFromNow: number): string {
 /**
  * Timelapse planner and runner. Planning: shooting time + video fps + video length give the
  * number of frames and the interval. The camera runs the schedule itself and always stores to
- * the SD card; this tab can also download each frame's JPEG to the PC while it stays open.
+ * the SD card; this tab can also download each frame's JPEG from the card while it stays open.
  */
 export function TimelapsePanel({
   connected,
   timelapse,
-  lastJpegBytes,
+  format,
+  jpegBytes,
+  rawBytes,
   transferBps,
   pcSaved,
-  pcSkipped,
+  pcQueued,
   pcSeriesActive,
   saveTarget,
   onStart,
   onStop,
+  onUseJpeg,
   onError,
 }: TimelapsePanelProps) {
   const [inputs, setInputs] = useState<Inputs>(loadInputs);
@@ -132,15 +141,22 @@ export function TimelapsePanel({
   const videoS = num(inputs.videoSeconds);
   const frames = Math.round(fps * videoS);
   const intervalS = frames > 0 ? durationS / frames : 0;
-  const sdBytes = frames * num(inputs.photoMB) * 1e6;
+  const withRaw = hasRaw(format);
+  const withJpeg = hasJpeg(format);
+  const rawEach = withRaw ? (rawBytes ?? MEASURED_RAW_BYTES) : 0;
+  const jpegKnown = !withJpeg || jpegBytes !== null;
+  const sdBytes = frames * (rawEach + (withJpeg ? (jpegBytes ?? 0) : 0));
   const bps = transferBps ?? MEASURED_BPS;
-  const transferS = lastJpegBytes ? lastJpegBytes / bps : null;
-  const pcBytes = lastJpegBytes ? frames * lastJpegBytes : null;
+  const transferS = jpegBytes ? jpegBytes / bps : null;
+  const pcBytes = jpegBytes ? frames * jpegBytes : null;
+  // Downloads queue up when a frame takes longer than the interval; none are dropped.
+  const pcLagS = transferS !== null ? Math.max(0, frames * transferS - durationS) : 0;
 
   let invalid: string | null = null;
   if (frames < 2) invalid = 'Set fps and video length to at least 2 frames.';
   else if (durationS <= 0) invalid = 'Set the shooting time.';
   else if (intervalS < MIN_INTERVAL_S) invalid = `Interval below ${MIN_INTERVAL_S} s: shorten the video or shoot longer.`;
+  else if (inputs.saveToPc && format && !withJpeg) invalid = 'The PC gets JPEGs, but the camera stores RAW only.';
 
   const start = async () => {
     if (invalid) return;
@@ -231,7 +247,7 @@ export function TimelapsePanel({
             <dt>To PC</dt>
             <dd>
               {pcSeriesActive
-                ? `${pcSaved} saved${pcSkipped > 0 ? `, ${pcSkipped} skipped (too slow)` : ''}`
+                ? `${pcSaved} saved${pcQueued > 0 ? `, ${pcQueued} queued` : ''}`
                 : 'off (SD card only)'}
             </dd>
           </dl>
@@ -302,36 +318,35 @@ export function TimelapsePanel({
             <dt>Ends at</dt>
             <dd>{durationS > 0 ? clockAt(durationS * 1000) : '--'}</dd>
             <dt>On SD card</dt>
-            <dd>
-              ≈ {formatBytes(sdBytes)}
-              <span className="timelapse-inline timelapse-photo-size">
-                (
-                <input
-                  type="number"
-                  className="input-sm input-xs"
-                  min={1}
-                  value={inputs.photoMB}
-                  onChange={(e) => set({ photoMB: e.target.value })}
-                  aria-label="Size of one photo on the card, MB"
-                  title="Size of one photo on the card in MB (ILCE-7 RAW measured 25 MB)"
-                />
-                MB each)
-              </span>
+            <dd title={`${formatLabel(format)} per frame`}>
+              {format ? `≈ ${formatBytes(sdBytes)}${jpegKnown ? '' : ' + JPEGs'}` : '--'}
+              <span className="timelapse-photo-size"> ({formatLabel(format)})</span>
             </dd>
           </dl>
+          {!jpegKnown && (
+            <p className="timelapse-note">Take one test photo so the JPEG size is known.</p>
+          )}
 
           <label className="timelapse-pc">
             <input type="checkbox" checked={inputs.saveToPc} onChange={(e) => set({ saveToPc: e.target.checked })} />
             <span>Also save JPEGs to this PC ({saveTarget})</span>
           </label>
-          {inputs.saveToPc && (
-            <p className={`timelapse-note ${transferS !== null && transferS > intervalS * 0.8 ? 'timelapse-warn' : ''}`}>
+          {inputs.saveToPc && format && !withJpeg && (
+            <p className="timelapse-note timelapse-warn">
+              The camera stores RAW only, so there is no JPEG to send.{' '}
+              <button type="button" className="btn btn-sm" onClick={onUseJpeg} disabled={!connected}>
+                Use RAW+JPEG
+              </button>
+            </p>
+          )}
+          {inputs.saveToPc && withJpeg && (
+            <p className={`timelapse-note ${pcLagS > 0 ? 'timelapse-warn' : ''}`}>
               {transferS === null
-                ? 'Take one photo first so the JPEG size is known.'
-                : `${formatBytes(lastJpegBytes ?? 0)} per frame, ≈ ${transferS.toFixed(1)} s each at ${formatBytes(bps)}/s${
-                    transferS > intervalS * 0.8
-                      ? ': faster than Wi‑Fi can keep up, so some frames will be skipped on the PC (the SD card gets all).'
-                      : `; ≈ ${formatBytes(pcBytes ?? 0)} in total. Keep this tab open.`
+                ? 'Take one test photo so the JPEG size is known.'
+                : `${formatBytes(jpegBytes ?? 0)} per frame, ≈ ${transferS.toFixed(1)} s each at ${formatBytes(bps)}/s, ≈ ${formatBytes(pcBytes ?? 0)} in total. ${
+                    pcLagS > 0
+                      ? `Wi‑Fi is slower than the interval: the PC finishes about ${formatDuration(pcLagS)} after the last shot. No frame is lost.`
+                      : 'Keep this tab open.'
                   }`}
             </p>
           )}

@@ -50,9 +50,15 @@ export interface CameraState {
     pos?: [number, number] | number[];
   };
   lastStoreImage?: {
-    imageId?: number;
-    file?: string;
+    status?: number;
+    DirectoryName?: string;
+    FileName?: string;
+    /** Files of the shot on the card; RAW+JPEG gives an ARW and a JPG. */
+    files?: StoredFile[];
   };
+  /** Still image quality (`highlevel.getCaptureSettings`). */
+  capture?: CaptureSettings;
+  outputCrop?: OutputCrop;
   lastShutterStatus?: number;
   capturing?: boolean;
   focusShift?: FocusShiftState;
@@ -162,6 +168,34 @@ export interface TimelapseState {
   /** Why the last run ended: completed, stopped or error. */
   finished?: string;
 }
+
+/** One file of a stored shot on the SD card. */
+export interface StoredFile {
+  name: string;
+  /** Absolute path on the camera, for `/api/photos/download`. */
+  path: string;
+  size: number;
+}
+
+/**
+ * Still image quality as the body reports it, with the allowed values of each field.
+ * ILCE-7: format jpeg | raw | rawjpeg, jpegQuality 95 | 50 | 25, imageSize large | midium | small,
+ * aspect 3:2 | 16:9.
+ */
+export interface CaptureSettings {
+  format?: string;
+  formatValues?: string[];
+  jpegQuality?: string;
+  jpegQualityValues?: string[];
+  imageSize?: string;
+  imageSizeValues?: string[];
+  aspect?: string;
+  aspectValues?: string[];
+  /** Resulting JPEG pixel size, e.g. 6000x4000. */
+  pictureSize?: string;
+}
+
+export type CaptureSettingsPatch = Partial<Pick<CaptureSettings, 'format' | 'jpegQuality' | 'imageSize' | 'aspect'>>;
 
 export interface FocusOffsetResult extends FocusShiftState {
   requested: number;
@@ -361,6 +395,21 @@ export class CameraClient {
 
   photoDownloadUrl(path: string): string {
     return `${this.baseUrl}/api/photos/download?path=${encodeURIComponent(path)}`;
+  }
+
+  /** Files of the newest shot on the card (fallback when a StoreImageComplete event has none). */
+  async lastShotFiles(): Promise<StoredFile[]> {
+    const res = await this.requestJson<{ files?: StoredFile[] }>('/api/photos/last-shot');
+    return res.files ?? [];
+  }
+
+  getCaptureSettings(): Promise<CaptureSettings> {
+    return this.call<CaptureSettings>('highlevel', 'getCaptureSettings', []);
+  }
+
+  /** Writes the given quality fields; resolves to what the camera reports afterwards. */
+  setCaptureSettings(patch: CaptureSettingsPatch): Promise<CaptureSettings> {
+    return this.call<CaptureSettings>('highlevel', 'setCaptureSettings', [patch]);
   }
 
   // --- Convenience Camera Controls ---
