@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { AfModePatch, AfModeState, CameraClient, FocusShiftState } from '../api/cameraClient';
+import type { AfModePatch, AfModeState, CameraClient, FocusArea, FocusShiftState, SpotSize } from '../api/cameraClient';
 
 interface FocusControlProps {
   client: CameraClient;
@@ -14,6 +14,14 @@ interface FocusControlProps {
   faceCount: number;
   onError: (msg: string) => void;
 }
+
+const AREA_LABELS: Record<FocusArea, string> = { wide: 'Wide', center: 'Center', spot: 'Spot' };
+const AREA_HINTS: Record<FocusArea, string> = {
+  wide: 'Wide: the camera picks the subject over most of the frame',
+  center: 'Center: focuses on the middle of the frame',
+  spot: 'Spot: a movable focus window; click the live view to place it',
+};
+const SIZE_LABELS: Record<SpotSize, string> = { small: 'S', medium: 'M', large: 'L' };
 
 /** AutoFocusDone status while continuous AF runs. */
 const AF_C_STATUS: Record<number, string> = { 0: 'idle', 1: 'locked', 2: 'no lock', 3: 'focusing', 4: 'tracking' };
@@ -58,6 +66,8 @@ export function FocusControl({ client, connected, focusShift, afMode, afStatus, 
 
   const continuous = afMode?.continuous === true;
   const faces = afMode?.faces === true;
+  const area: FocusArea = afMode?.area ?? 'spot';
+  const spotSize: SpotSize = afMode?.spotSize ?? 'large';
   const ready = connected && focusShift?.ready === true && !continuous;
   const min = focusShift?.min ?? -DEFAULT_RANGE;
   const max = focusShift?.max ?? DEFAULT_RANGE;
@@ -275,7 +285,7 @@ export function FocusControl({ client, connected, focusShift, afMode, afStatus, 
             className={`segmented-btn ${continuous ? 'is-active' : ''}`}
             aria-pressed={continuous}
             disabled={!connected || modeBusy}
-            onClick={() => !continuous && void changeAfMode({ continuous: true, area: 'wide' })}
+            onClick={() => !continuous && void changeAfMode({ continuous: true })}
             title="Continuous AF (AF-C): the camera keeps refocusing on its own"
           >
             Continuous
@@ -293,20 +303,56 @@ export function FocusControl({ client, connected, focusShift, afMode, afStatus, 
         </button>
       </div>
 
+      <div className="quality-row">
+        <span className="quality-label">Area</span>
+        <div className="segmented" role="group" aria-label="Focus area">
+          {(Object.keys(AREA_LABELS) as FocusArea[]).map((a) => (
+            <button
+              key={a}
+              type="button"
+              className={`segmented-btn ${area === a ? 'is-active' : ''}`}
+              aria-pressed={area === a}
+              disabled={!connected || modeBusy}
+              onClick={() => area !== a && void changeAfMode({ area: a })}
+              title={AREA_HINTS[a]}
+            >
+              {AREA_LABELS[a]}
+            </button>
+          ))}
+        </div>
+        {area === 'spot' && (
+          <div className="segmented" role="group" aria-label="Spot size">
+            {(Object.keys(SIZE_LABELS) as SpotSize[]).map((z) => (
+              <button
+                key={z}
+                type="button"
+                className={`segmented-btn ${spotSize === z ? 'is-active' : ''}`}
+                aria-pressed={spotSize === z}
+                disabled={!connected || modeBusy}
+                onClick={() => spotSize !== z && void changeAfMode({ spotSize: z })}
+                title={`Spot size ${SIZE_LABELS[z]}`}
+              >
+                {SIZE_LABELS[z]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {connected && continuous && (
         <p className="focus-lock-hint">
-          {afMode?.area === 'spot' ? 'Continuous AF follows the spot you clicked. ' : 'Continuous AF over the Wide area. '}
-          {faces ? 'Faces come first. ' : ''}
-          Click the live view to move the AF spot.{' '}
-          {afMode?.area === 'spot' && (
-            <button type="button" className="autosave-link" disabled={modeBusy} onClick={() => void changeAfMode({ area: 'wide' })}>
-              Back to Wide
-            </button>
-          )}
+          The camera keeps refocusing{area === 'spot' ? ' in the spot' : area === 'center' ? ' in the centre' : ' over the Wide area'}
+          {faces ? ', faces first' : ''}.{' '}
+          {area === 'spot' ? 'Click the live view to move the spot.' : 'Click the live view to refocus.'}
         </p>
       )}
       {connected && !continuous && !ready && (
-        <p className="focus-lock-hint">Click the live view to autofocus first. The knob fine-tunes focus around that point.</p>
+        <p className="focus-lock-hint">
+          {area === 'spot'
+            ? 'Click the live view to place the spot and autofocus.'
+            : `Click the live view to autofocus over the ${area === 'center' ? 'Center' : 'Wide'} area.`}{' '}
+          The knob then fine-tunes focus around that point.
+        </p>
       )}
 
       <div className="focus-knob-row">

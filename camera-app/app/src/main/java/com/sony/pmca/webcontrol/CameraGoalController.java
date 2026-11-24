@@ -551,44 +551,13 @@ public class CameraGoalController {
      */
     private static final long AF_SETTLE_MS = 300L;
 
-    /**
-     * Flexible spot focus point for a position (0..1) in the live view: the range the body
-     * reports for the flexible spot, or the ILCE-7's range when it reports none.
-     */
-    static int[] flexSpotPoint(CameraEx cam, double nx, double ny) {
-        int left = -784, right = 785, top = -819, bottom = 820;
-        try {
-            CameraEx.FocusAreaInfos[] infos = cam.getFocusAreaInfos(0);
-            if (infos != null) {
-                for (CameraEx.FocusAreaInfos info : infos) {
-                    if (info != null && CameraEx.ParametersModifier.FOCUS_AREA_MODE_FLEX_SPOT.equals(info.focusAreaMode)
-                            && info.rectInfos != null && info.rectInfos.length > 0 && info.rectInfos[0] != null && info.rectInfos[0].rect != null) {
-                        left = info.rectInfos[0].rect.left;
-                        right = info.rectInfos[0].rect.right;
-                        top = info.rectInfos[0].rect.top;
-                        bottom = info.rectInfos[0].rect.bottom;
-                        break;
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return new int[]{
-                (int) Math.round(left + nx * (right - left)),
-                (int) Math.round(top + ny * (bottom - top)),
-        };
-    }
-
     private JSONObject autoFocusAt(double nx, double ny) throws Exception {
         final double clampedX = Math.max(0.0, Math.min(1.0, nx));
         final double clampedY = Math.max(0.0, Math.min(1.0, ny));
-        AfModeController afMode = m_activity.getAfMode();
+        final AfModeController afMode = m_activity.getAfMode();
         if (afMode.isContinuous()) {
-            // Continuous AF: move its spot here instead of a single AF.
-            JSONObject want = new JSONObject();
-            want.put("x", clampedX);
-            want.put("y", clampedY);
-            JSONObject res = afMode.setAfMode(want);
+            // Continuous AF: move its spot here (Spot area) or refocus, instead of a single AF.
+            JSONObject res = afMode.continuousClick(clampedX, clampedY);
             res.put("superseded", false);
             res.put("timedOut", false);
             return res;
@@ -627,19 +596,10 @@ public class CameraGoalController {
                         } catch (Throwable ignored) {
                         }
 
-                        int[] pt = flexSpotPoint(cam, clampedX, clampedY);
-                        int fx = pt[0];
-                        int fy = pt[1];
-                        targetPoint[0] = fx;
-                        targetPoint[1] = fy;
-
-                        Camera.Parameters params = cam.createEmptyParameters();
-                        CameraEx.ParametersModifier modifier = cam.createParametersModifier(params);
-                        params.setFocusMode(Camera.Parameters.FOCUS_MODE_AUTO);
-                        modifier.setFocusAreaMode(CameraEx.ParametersModifier.FOCUS_AREA_MODE_FLEX_SPOT);
-                        modifier.setAutoFocusMode(CameraEx.ParametersModifier.AUTO_FOCUS_MODE_AF_S);
-                        modifier.setFocusPoint(fx, fy);
-                        normal.setParameters(params);
+                        // Current focus area; in Spot mode the spot moves to the clicked point.
+                        int[] pt = afMode.configureSingleAf(cam, clampedX, clampedY);
+                        targetPoint[0] = pt[0];
+                        targetPoint[1] = pt[1];
 
                         normal.autoFocus(new Camera.AutoFocusCallback() {
                             @Override

@@ -779,6 +779,8 @@ export function App() {
               onCapture={handleCapture}
               capturing={Boolean(state?.capturing)}
               faces={state?.afMode?.faces ? state?.faces?.faces : undefined}
+              afMode={state?.afMode}
+              afLock={state?.afStatus}
               onError={setErrorMsg}
             />
             <div className="side-column">

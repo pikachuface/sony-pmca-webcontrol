@@ -141,19 +141,29 @@ export interface AutoFocusResult {
   continuous?: boolean;
 }
 
+export type FocusArea = 'wide' | 'center' | 'spot';
+export type SpotSize = 'small' | 'medium' | 'large';
+
 /**
- * Continuous AF (the body's AF-C, refocusing by itself) and face detection. `area` "wide" is
- * the camera's Wide area, "spot" a flexible spot at x, y (0..1 of the unrotated live view).
+ * Focus area, continuous AF (the body's AF-C, refocusing by itself) and face detection.
+ * `area` "wide" is the camera's Wide area, "center" its Center area, "spot" a flexible spot of
+ * `spotSize` centred at x, y (0..1 of the unrotated live view). `window` is the focus area as
+ * the camera reports it, normalized to the unrotated live view.
  */
 export interface AfModeState {
   continuous: boolean;
   faces: boolean;
-  area: 'wide' | 'spot';
+  area: FocusArea;
+  spotSize?: SpotSize;
   x?: number;
   y?: number;
+  window?: { x: number; y: number; w: number; h: number };
 }
 
-export type AfModePatch = Partial<AfModeState>;
+export type AfModePatch = Partial<Pick<AfModeState, 'continuous' | 'faces' | 'area' | 'spotSize' | 'x' | 'y'>> & {
+  /** Restart a running AF-C. */
+  refocus?: boolean;
+};
 
 /** A detected face, normalized to the unrotated live view frame. */
 export interface FaceBox {

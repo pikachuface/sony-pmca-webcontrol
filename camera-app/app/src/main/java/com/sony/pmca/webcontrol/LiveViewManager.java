@@ -8,6 +8,7 @@ import com.sony.scalar.hardware.DeviceMemory;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 
 /**
  * Manages hardware LiveView streaming via Sony CameraSequence and
@@ -16,6 +17,13 @@ import java.util.ArrayList;
 public class LiveViewManager {
     public static final int MAX_MJPEG_CLIENTS = 3;
     private static final int LIVEVIEW_BUF_CAPACITY = 128 * 1024;
+    /**
+     * Frame period by number of MJPEG clients. A frame is about 35 KB and Wi-Fi gives about
+     * 2.3 MB/s, so three clients at 20 fps already use most of it. The period is measured from
+     * the start of one fetch to the next; a fetch takes about 12 ms on the ILCE-7. (Sleeping a
+     * fixed 33/50/85 ms after each fetch gave only 8.6 fps with three clients.)
+     */
+    private static final long[] FRAME_PERIOD_MS = {33, 33, 40, 50};
 
     public static final class MjpegClient {
         final String cid;
@@ -46,6 +54,7 @@ public class LiveViewManager {
     private volatile long m_lastCapturedIndex;
     private long m_lastLiveviewFetchMs = 0;
     private long m_lastFetchDurationMs = 0;
+    private long m_duplicateFrames = 0;
     private long m_frameSeq = 0;
     private final ArrayList<MjpegClient> m_mjpegClientList = new ArrayList<MjpegClient>(MAX_MJPEG_CLIENTS);
     private volatile boolean m_liveviewRunning = false;
@@ -275,20 +284,19 @@ public class LiveViewManager {
                     break;
                 }
                 int clientCount = m_mjpegClientList.size();
-                if (clientCount <= 1) {
-                    intervalMs = 33;
-                } else if (clientCount == 2) {
-                    intervalMs = 50;
-                } else {
-                    intervalMs = 85;
-                }
+                intervalMs = FRAME_PERIOD_MS[Math.min(clientCount, FRAME_PERIOD_MS.length - 1)];
             }
 
-            fetchPreviewFrame(intervalMs);
+            long start = System.currentTimeMillis();
+            // Half the period: a /api/liveview.jpg request may have fetched a frame just now.
+            fetchPreviewFrame(intervalMs / 2);
 
-            try {
-                Thread.sleep(intervalMs);
-            } catch (InterruptedException ignored) {
+            long sleepMs = intervalMs - (System.currentTimeMillis() - start);
+            if (sleepMs > 0) {
+                try {
+                    Thread.sleep(sleepMs);
+                } catch (InterruptedException ignored) {
+                }
             }
         }
     }
@@ -342,9 +350,14 @@ public class LiveViewManager {
         if (jpeg != null) {
             long finishedAt = System.currentTimeMillis();
             synchronized (m_frameLock) {
-                m_latestJpeg = jpeg;
                 m_lastLiveviewFetchMs = finishedAt;
                 m_lastFetchDurationMs = finishedAt - fetchStart;
+                if (m_latestJpeg != null && m_latestJpeg.length == jpeg.length && Arrays.equals(m_latestJpeg, jpeg)) {
+                    // The body had no new frame yet; do not send the same picture again.
+                    m_duplicateFrames++;
+                    return;
+                }
+                m_latestJpeg = jpeg;
                 m_frameSeq++;
                 m_frameLock.notifyAll();
             }
@@ -365,6 +378,7 @@ public class LiveViewManager {
                 obj.put("frameSeq", m_frameSeq);
                 obj.put("lastFrameBytes", m_latestJpeg != null ? m_latestJpeg.length : 0);
                 obj.put("lastFetchDurationMs", m_lastFetchDurationMs);
+                obj.put("duplicateFrames", m_duplicateFrames);
                 obj.put("lastFetchAgeMs", m_lastLiveviewFetchMs > 0 ? (System.currentTimeMillis() - m_lastLiveviewFetchMs) : -1);
             }
         } catch (Throwable ignored) {

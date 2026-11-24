@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CameraClient, FaceBox } from '../api/cameraClient';
+import type { AfModeState, CameraClient, FaceBox } from '../api/cameraClient';
 import { CropOverlay } from './CropOverlay';
 import { clamp, containBox, rectDisplayToImage, rectImageToDisplay, type NRect } from './viewGeometry';
 
@@ -14,6 +14,10 @@ interface LiveViewPanelProps {
   capturing: boolean;
   /** Faces the camera detects (unrotated, normalized); undefined while face detection is off. */
   faces?: FaceBox[];
+  /** Focus area and AF-C state; its window is drawn over the image. */
+  afMode?: AfModeState;
+  /** Status of the last AutoFocusDone event (AF-C: 1 locked, 2 cannot lock, 3 working, 4 continuous). */
+  afLock?: number;
   onError?: (msg: string | null) => void;
 }
 
@@ -35,6 +39,8 @@ export function LiveViewPanel({
   onCapture,
   capturing,
   faces,
+  afMode,
+  afLock,
   onError,
 }: LiveViewPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -48,7 +54,6 @@ export function LiveViewPanel({
   const [peaking, setPeaking] = useState(false);
   const [showHistogram, setShowHistogram] = useState(false);
   const [afStatus, setAfStatus] = useState<'idle' | 'focusing' | 'ok' | 'fail' | 'afc'>('idle');
-  const [focusPoint, setFocusPoint] = useState<{ x: number; y: number } | null>(null);
   const [rotationDeg, setRotationDeg] = useState<0 | 90 | 180 | 270>(() => {
     try {
       const saved = Number(localStorage.getItem('pmca_lv_rotation'));
@@ -61,10 +66,6 @@ export function LiveViewPanel({
   const [frameError, setFrameError] = useState<string | null>(null);
   const [lvMode, setLvMode] = useState<'mjpeg' | 'jpg'>('mjpeg');
 
-  const focusPointRef = useRef<{ x: number; y: number } | null>(null);
-  focusPointRef.current = focusPoint;
-  const afStatusRef = useRef<'idle' | 'focusing' | 'ok' | 'fail' | 'afc'>('idle');
-  afStatusRef.current = afStatus;
   const liveViewCidRef = useRef<string>(getLiveViewClientId());
   const afTimerRef = useRef<number | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
@@ -95,7 +96,6 @@ export function LiveViewPanel({
     clearAfTimer();
     afTimerRef.current = window.setTimeout(() => {
       setAfStatus('idle');
-      setFocusPoint(null);
       afTimerRef.current = null;
     }, delayMs);
   };
@@ -142,7 +142,6 @@ export function LiveViewPanel({
     });
     clearAfTimer();
     setAfStatus('idle');
-    setFocusPoint(null);
   };
 
   useEffect(() => {
@@ -227,26 +226,6 @@ export function LiveViewPanel({
                   applyFocusPeaking(data, canvas.width, canvas.height);
                   ctx.putImageData(imgData, 0, 0);
                 }
-              }
-
-              // Draw AF target box on main canvas
-              if (afStatusRef.current !== 'idle' && focusPointRef.current) {
-                const label =
-                  afStatusRef.current === 'focusing'
-                    ? 'AF...'
-                    : afStatusRef.current === 'ok'
-                      ? 'AF OK'
-                      : afStatusRef.current === 'afc'
-                        ? 'AF-C'
-                        : 'AF Fail';
-                drawFocusBox(
-                  ctx,
-                  focusPointRef.current.x,
-                  focusPointRef.current.y,
-                  72,
-                  72,
-                  label,
-                );
               }
 
             }
@@ -416,8 +395,6 @@ export function LiveViewPanel({
 
     const dispX = relX / renderWidth;
     const dispY = relY / renderHeight;
-    const clickX = Math.round(dispX * canvas.width);
-    const clickY = Math.round(dispY * canvas.height);
 
     let normX = dispX;
     let normY = dispY;
@@ -433,7 +410,6 @@ export function LiveViewPanel({
     }
 
     clearAfTimer();
-    setFocusPoint({ x: clickX, y: clickY });
     setAfStatus('focusing');
     try {
       const res = await client.autoFocusAt(normX, normY);
@@ -518,6 +494,37 @@ export function LiveViewPanel({
     width: viewScale * gridBase.width,
     height: viewScale * gridBase.height,
   };
+
+  // Focus window in stage pixels: the camera's area, coloured by the AF result.
+  const fw = afMode?.window;
+  const focusRect =
+    fw && fw.w > 0 && fw.h > 0
+      ? (() => {
+          const d = rectImageToDisplay(fw, rotationDeg);
+          return {
+            left: viewX + viewScale * (box.left + d.x * box.width),
+            top: viewY + viewScale * (box.top + d.y * box.height),
+            width: viewScale * d.w * box.width,
+            height: viewScale * d.h * box.height,
+          };
+        })()
+      : null;
+  const continuous = afMode?.continuous === true;
+  // A click's result shows for 2 s; otherwise AF-C shows the camera's live status.
+  const focusState: 'idle' | 'focusing' | 'ok' | 'fail' =
+    afStatus === 'focusing' || afStatus === 'ok' || afStatus === 'fail'
+      ? afStatus
+      : continuous
+        ? afLock === 1 || afLock === 4
+          ? 'ok'
+          : afLock === 2
+            ? 'fail'
+            : afLock === 3
+              ? 'focusing'
+              : 'idle'
+        : 'idle';
+  const focusLabel =
+    focusState === 'focusing' ? 'AF…' : focusState === 'ok' ? (continuous ? 'AF-C' : 'AF OK') : focusState === 'fail' ? 'No focus' : continuous ? 'AF-C' : '';
 
   // Face boxes in stage pixels, like the grid (outside the transformed viewport).
   const faceRects = (faces ?? []).map((f) => {
@@ -811,6 +818,15 @@ export function LiveViewPanel({
             <span className="grid-line grid-line-h" style={{ top: '66.667%' }} />
           </div>
         )}
+        {connected && streaming && !frameError && focusRect && (
+          <div
+            className={`focus-window is-${focusState} ${afMode?.area === 'wide' ? 'is-wide' : ''}`}
+            style={focusRect}
+            aria-hidden="true"
+          >
+            {focusLabel && <span className="focus-window-label">{focusLabel}</span>}
+          </div>
+        )}
         {connected && streaming && !frameError &&
           faceRects.map((r, i) => (
             <div
@@ -964,67 +980,4 @@ function applyFocusPeaking(data: Uint8ClampedArray, w: number, h: number) {
       }
     }
   }
-}
-
-function drawFocusBox(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  boxW: number,
-  boxH: number,
-  zoomText: string,
-  color = '#7ee787',
-) {
-  ctx.save();
-  const left = cx - boxW / 2;
-  const top = cy - boxH / 2;
-
-  // Box border with outer glow
-  ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
-  ctx.shadowBlur = 4;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 1.5;
-  ctx.strokeRect(left, top, boxW, boxH);
-
-  // Corner bracket accents
-  const cornerLen = Math.max(6, Math.min(boxW, boxH) * 0.22);
-  ctx.lineWidth = 2.5;
-  ctx.beginPath();
-  // Top-left
-  ctx.moveTo(left, top + cornerLen);
-  ctx.lineTo(left, top);
-  ctx.lineTo(left + cornerLen, top);
-  // Top-right
-  ctx.moveTo(left + boxW - cornerLen, top);
-  ctx.lineTo(left + boxW, top);
-  ctx.lineTo(left + boxW, top + cornerLen);
-  // Bottom-left
-  ctx.moveTo(left, top + boxH - cornerLen);
-  ctx.lineTo(left, top + boxH);
-  ctx.lineTo(left + cornerLen, top + boxH);
-  // Bottom-right
-  ctx.moveTo(left + boxW - cornerLen, top + boxH);
-  ctx.lineTo(left + boxW, top + boxH);
-  ctx.lineTo(left + boxW, top + boxH - cornerLen);
-  ctx.stroke();
-
-  // Center crosshair
-  const chLen = 5;
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(cx - chLen, cy);
-  ctx.lineTo(cx + chLen, cy);
-  ctx.moveTo(cx, cy - chLen);
-  ctx.lineTo(cx, cy + chLen);
-  ctx.stroke();
-
-  // Badge label above box
-  ctx.font = 'bold 10px monospace';
-  const labelW = Math.max(34, Math.ceil(ctx.measureText(zoomText).width) + 8);
-  ctx.fillStyle = 'rgba(13, 17, 23, 0.8)';
-  ctx.fillRect(left, Math.max(0, top - 16), labelW, 14);
-  ctx.fillStyle = color;
-  ctx.fillText(zoomText, left + 4, Math.max(11, top - 5));
-
-  ctx.restore();
 }

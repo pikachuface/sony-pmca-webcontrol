@@ -1013,6 +1013,59 @@ body {
   pointer-events: none;
 }
 
+/* The camera's focus area; clicks pass through to the live view. */
+.focus-window {
+  position: absolute;
+  pointer-events: none;
+  border: 2px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  transition: left 120ms linear, top 120ms linear, width 120ms linear, height 120ms linear;
+}
+
+.focus-window.is-wide {
+  border-style: dashed;
+  border-width: 1px;
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+.focus-window.is-focusing {
+  border-color: #e3b341;
+}
+
+.focus-window.is-ok {
+  border-color: #7ee787;
+}
+
+.focus-window.is-fail {
+  border-color: #ff7b72;
+}
+
+.focus-window-label {
+  position: absolute;
+  left: -2px;
+  bottom: 100%;
+  margin-bottom: 2px;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(0, 0, 0, 0.6);
+  border-radius: 3px;
+}
+
+.focus-window.is-focusing .focus-window-label {
+  color: #e3b341;
+}
+
+.focus-window.is-ok .focus-window-label {
+  color: #7ee787;
+}
+
+.focus-window.is-fail .focus-window-label {
+  color: #ff7b72;
+}
+
 /* Faces the camera detects; clicks pass through to the live view (AF there). */
 .face-box {
   position: absolute;

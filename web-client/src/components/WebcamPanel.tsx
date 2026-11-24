@@ -73,10 +73,10 @@ export function WebcamPanel({ client, connected, cropEnabled }: WebcamPanelProps
         hint="Live view with the crop from the live view's Crop tool applied"
       />
       <p className="quality-note">
-        MJPEG, 640 px wide, about 15 fps (the camera's live view). {cropEnabled ? 'Output is cropped.' : 'Output equals Full until you set a crop (✂ in the live view).'} Up to 3 viewers at once, including this page.
+        MJPEG, 640 px wide, up to about 18 fps (the camera's live view; fewer in dim light and with more viewers). {cropEnabled ? 'Output is cropped.' : 'Output equals Full until you set a crop (✂ in the live view).'} Up to 3 viewers at once, including this page.
       </p>
       <p className="quality-note">
-        OBS: Sources → Media Source → uncheck Local File → paste the URL. Photos are not saved in this mode unless you press the shutter (then only to the SD card).
+        OBS: Sources → Media Source → uncheck Local File → paste the URL; set Network Buffering to 0 MB, or the picture lags by seconds. Photos are not saved in this mode unless you press the shutter (then only to the SD card).
       </p>
     </section>
   );
