@@ -28,7 +28,7 @@ import fi.iki.elonen.NanoHTTPD;
  * Debug console on its own port: runs BeanShell (Java syntax, loosely typed) inside the app,
  * so camera behaviour can be explored without rebuilding the APK.
  *
- * Every request except GET / needs the key shown on the camera screen, as header
+ * Every request except GET / needs the debug key, as header
  * {@code X-Debug-Key} or parameter {@code key}. The key comes from camera-app/debug-key.txt at
  * build time (gitignored); without it, a random key is generated once and kept in the app's
  * private preferences. Anyone with the key can run arbitrary code as this app.
@@ -53,7 +53,7 @@ public class DebugServer extends NanoHTTPD {
 
     private static final String HELP =
             "WebControl A7 debug console (BeanShell)\n"
-            + "Auth: header X-Debug-Key: <key from the camera screen>, or ?key=\n\n"
+            + "Auth: header X-Debug-Key: <key from camera-app/debug-key.txt, or the camera screen when none was built in>, or ?key=\n\n"
             + "POST /eval[?thread=worker|main][&timeout=ms][&reset=1]   body = script\n"
             + "GET  /logcat[?lines=500]\n\n"
             + "Bound: activity, cam (CameraEx), normal (android.hardware.Camera), hub, goal, dbg\n"
@@ -77,6 +77,11 @@ public class DebugServer extends NanoHTTPD {
 
     public String getKey() {
         return m_key;
+    }
+
+    /** True when the key was built in from camera-app/debug-key.txt. */
+    public boolean isBuildKey() {
+        return m_key.equals(BuildConfig.DEBUG_KEY);
     }
 
     private static String loadKey(Context ctx) {
@@ -114,7 +119,7 @@ public class DebugServer extends NanoHTTPD {
                 Thread.sleep(500); // slows down guessing
             } catch (InterruptedException ignored) {
             }
-            return text(Response.Status.UNAUTHORIZED, "Wrong or missing debug key (shown on the camera screen)\n");
+            return text(Response.Status.UNAUTHORIZED, "Wrong or missing debug key (camera-app/debug-key.txt, or the camera screen when none was built in)\n");
         }
         try {
             if ("/eval".equals(uri) && Method.POST.equals(session.getMethod())) {

@@ -56,6 +56,9 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
     private boolean m_statusBarsVisible = true;
 
     private WifiManager m_wifiManager;
+    /** Keeps Wi-Fi up while the app runs; without it Android may put Wi-Fi to sleep and drop clients. */
+    private WifiManager.WifiLock m_wifiLock;
+    private String m_lastWifiLog;
     private BroadcastReceiver m_networkStateReceiver;
     private BroadcastReceiver m_batteryReceiver;
     private MacroHttpServer m_httpServer;
@@ -143,9 +146,17 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         m_tvWifiStatus = (TextView) findViewById(R.id.tvWifiStatus);
 
         m_wifiManager = (WifiManager) getSystemService(Context.WIFI_SERVICE);
+        try {
+            m_wifiLock = m_wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL, "webcontrol");
+            m_wifiLock.setReferenceCounted(false);
+        } catch (Throwable t) {
+            m_wifiLock = null;
+            Logger.error("Wi-Fi lock unavailable: " + t.toString());
+        }
         m_networkStateReceiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context context, Intent intent) {
+                logWifiChange(intent);
                 updateWifiStatus();
             }
         };
@@ -169,6 +180,9 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         }
         try {
             m_wifiManager.setWifiEnabled(true);
+            if (m_wifiLock != null) {
+                m_wifiLock.acquire();
+            }
         } catch (Throwable t) {
             Logger.error("Wi-Fi init error: " + t.toString());
         }
@@ -605,6 +619,12 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         } catch (Throwable ignored) {
         }
         try {
+            if (m_wifiLock != null && m_wifiLock.isHeld()) {
+                m_wifiLock.release();
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
             m_wifiManager.setWifiEnabled(false);
         } catch (Throwable ignored) {
         }
@@ -719,6 +739,27 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         return n + "/" + d;
     }
 
+    /**
+     * Writes each Wi-Fi state change to the app log on the card (PMCADEMO/LOG.TXT), flushed at
+     * once, so a dropped connection can be traced afterwards.
+     */
+    private void logWifiChange(Intent intent) {
+        try {
+            NetworkInfo ni = intent.getParcelableExtra(WifiManager.EXTRA_NETWORK_INFO);
+            WifiInfo info = m_wifiManager.getConnectionInfo();
+            String line = "Wi-Fi " + (ni != null ? ni.getDetailedState() : "?")
+                    + " ip=" + Formatter.formatIpAddress(info != null ? info.getIpAddress() : 0)
+                    + " rssi=" + (info != null ? info.getRssi() : 0)
+                    + " lock=" + (m_wifiLock != null && m_wifiLock.isHeld());
+            if (!line.equals(m_lastWifiLog)) {
+                m_lastWifiLog = line;
+                Logger.info(line);
+                Logger.flush();
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void updateWifiStatus() {
         try {
             WifiInfo info = m_wifiManager.getConnectionInfo();
@@ -730,8 +771,10 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             String portSuffix = (m_httpPort == 80) ? "" : (":" + m_httpPort);
             NetworkInfo.DetailedState state = WifiInfo.getDetailedStateOf(info.getSupplicantState());
             if (ipInt != 0) {
-                String debug = m_debugServer != null
-                        ? "\nDebug :" + DebugServer.PORT + "  key " + m_debugServer.getKey() : "";
+                // One line only (the view is singleLine). The debug key is shown only when it was
+                // generated on the camera; a key built in from debug-key.txt is already known.
+                String debug = m_debugServer != null && !m_debugServer.isBuildKey()
+                        ? "   debug key " + m_debugServer.getKey() : "";
                 m_tvWifiStatus.setText("Wi-Fi: " + ssid + " -> http://" + m_wifiIp + portSuffix + debug);
             } else {
                 m_tvWifiStatus.setText("Wi-Fi: " + state.name() + " (" + ssid + ")");
