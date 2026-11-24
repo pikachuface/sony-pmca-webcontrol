@@ -26,6 +26,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -138,6 +139,28 @@ class ServerState:
             path: MjpegRelay(self.camera_url, path, f"host-relay-{name}")
             for path, name in (("/api/liveview.mjpeg", "liveview"), ("/api/output.mjpeg", "output"))
         }
+        self._crop_lock = threading.Lock()
+        self._crop_checked = 0.0
+        self._crop_enabled = True
+
+    def output_cropped(self) -> bool:
+        """Whether the camera crops /api/output.mjpeg (checked at most every 2 s)."""
+        with self._crop_lock:
+            now = time.monotonic()
+            if now - self._crop_checked > 2.0:
+                self._crop_checked = now
+                try:
+                    with urllib.request.urlopen(f"{self.camera_url}/api/output/crop", timeout=3) as resp:
+                        self._crop_enabled = bool(json.load(resp).get("enabled"))
+                except Exception:
+                    pass  # keep the last answer; True until the camera has answered once
+            return self._crop_enabled
+
+    def relay_for(self, path: str) -> MjpegRelay:
+        """Without a crop the output equals the live view: share one camera stream for both."""
+        if path == "/api/output.mjpeg" and not self.output_cropped():
+            return self.relays["/api/liveview.mjpeg"]
+        return self.relays[path]
 
 
 class CompanionHandler(BaseHTTPRequestHandler):
@@ -178,9 +201,8 @@ class CompanionHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        relay = self.app_state.relays.get(path)
-        if relay is not None:
-            self._serve_relay(relay)
+        if path in self.app_state.relays:
+            self._serve_relay(path)
             return
 
         if path.startswith("/api/"):
@@ -226,7 +248,8 @@ class CompanionHandler(BaseHTTPRequestHandler):
         self._drain_request_body()
         self._send_json(404, {"error": "Not found"})
 
-    def _serve_relay(self, relay: MjpegRelay) -> None:
+    def _serve_relay(self, path: str) -> None:
+        relay = self.app_state.relay_for(path)
         relay.subscribe()
         try:
             self.send_response(200)
@@ -237,8 +260,18 @@ class CompanionHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.end_headers()
             last = -1
+            next_check = time.monotonic() + 2.0
             while True:
-                seq, frame = relay.wait_frame(last, 5.0)
+                if time.monotonic() >= next_check:
+                    # A crop switched on or off: follow it without reconnecting the viewer.
+                    next_check = time.monotonic() + 2.0
+                    wanted = self.app_state.relay_for(path)
+                    if wanted is not relay:
+                        wanted.subscribe()
+                        relay.unsubscribe()
+                        relay = wanted
+                        last = -1
+                seq, frame = relay.wait_frame(last, 2.0)
                 if frame is None or seq == last:
                     continue
                 last = seq
