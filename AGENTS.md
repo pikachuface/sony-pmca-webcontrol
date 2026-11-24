@@ -17,6 +17,7 @@ Project: **Sony PMCA WebControl** — Android 2.3 (API 10) in-camera HTTP/RPC br
     ```bash
     .venv/bin/python tools/Sony-PMCA-RE/pmca-console.py install -f camera-app/app/build/outputs/apk/sony-pmca-webcontrol-debug-1.0.0.apk
     ```
+  * **Over Wi-Fi** (once a build with `/ota` is installed): `CAM=<ip> scripts/ota.sh` packs the APK as SPK with Sony-PMCA-RE and installs it through the debug console; the app closes, start it again on the camera.
   * **Linux desktop GVFS note**: If `pmca-console.py` fails with `USBError: [Errno 16] Resource busy`, unmount the auto-mounted MTP volume first:
     ```bash
     gio mount -l | grep -i gphoto2

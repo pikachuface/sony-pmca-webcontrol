@@ -25,7 +25,7 @@ The camera runs an embedded HTTP server (`MacroHttpServer`, `NanoHTTPD` on port 
 | `GET  /api/output.mjpeg`, `/api/output.jpg` | Live view with the output crop applied |
 | `GET/POST /api/output/crop` | Output crop (`{enabled, x, y, w, h}`, normalized, unrotated image) |
 | `GET  /api/photos/download` | Download a specific SD card file (`.JPG` or `.ARW`) |
-| `POST :8081/eval`, `GET :8081/logcat` | Debug console on its own port (BeanShell scripts, logcat); needs the debug key |
+| `POST :8081/eval`, `GET :8081/logcat`, `POST :8081/ota` | Debug console on its own port (BeanShell scripts, logcat, install over Wi-Fi); needs the debug key |
 | `GET  /api/photos/last-shot` | Files of the newest shot on the card (`{ files: [{name, path, size}] }`; RAW+JPEG gives two) |
 | `GET  /api/log` | Plain-text camera debug/crash log |
 
@@ -208,6 +208,7 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 
 * **`POST /eval[?thread=worker|main][&timeout=ms][&reset=1]`**, body = script. Runs on a worker thread by default (timeout 10 s, max 300 s); `thread=main` runs the whole script on the main thread. Variables persist between calls until `reset=1`. Redefining a scripted method keeps the first definition (a BeanShell 2.0b6 quirk), so send `reset=1` with scripts that define methods. Returns `{ ok, ms, result, resultClass, output, error }`; `print(x)` writes to `output`.
 * **`GET /logcat[?lines=500]`**: The last lines of `logcat -d -v time` (`READ_LOGS` permission).
+* **`POST /ota[?md5=hex]`**, body = SPK (the APK packed by Sony-PMCA-RE; `scripts/ota.sh` does it all). Stores it as `/data/local/tmp/webcontrol-ota.1.spk`, checks the `1spk` header and the MD5, answers `{ ok, bytes, md5, message }` and then starts the camera's own installer (`com.sony.scalar.dlsys.scalarainstaller/.PackageInstallerActivity`, the same one a USB install ends in). The app closes during the install; start it again from the application list. The installer only accepts a path ending in `.1.spk` and deletes the file afterwards.
 
 Bound variables: `activity` (`MacroServerActivity`), `cam` (`CameraEx`), `normal` (`android.hardware.Camera`), `hub` (`CameraEventHub`), `goal` (`CameraGoalController`) and `dbg`:
 

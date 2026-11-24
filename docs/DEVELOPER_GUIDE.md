@@ -87,6 +87,9 @@ gio mount -u gphoto2://Sony_ILCE-6000_.../
 
 # Flash the APK:
 .venv/bin/python tools/Sony-PMCA-RE/pmca-console.py install -f camera-app/app/build/outputs/apk/sony-pmca-webcontrol-debug-1.0.0.apk
+
+# Later builds over Wi-Fi (the app must be running; it closes during the install):
+CAM=10.10.30.104 scripts/ota.sh
 ```
 
 ---

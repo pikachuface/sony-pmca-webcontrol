@@ -1,7 +1,12 @@
 package com.sony.pmca.webcontrol;
 
+import android.content.ComponentName;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 
 import com.github.ma1co.pmcademo.app.Logger;
 
@@ -9,11 +14,14 @@ import org.json.JSONObject;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.PrintStream;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.LinkedList;
 import java.util.Map;
@@ -39,6 +47,8 @@ import fi.iki.elonen.NanoHTTPD;
  * Runs on a worker thread by default; {@code dbg.main("...")} runs a piece on the main thread,
  * where camera calls belong. Variables persist between calls until reset=1.</li>
  * <li>GET /logcat[?lines=N] the last N lines of {@code logcat -d -v time}.</li>
+ * <li>POST /ota[?md5=hex] with an SPK (the APK packed by Sony-PMCA-RE) as the body: stores it
+ * and starts the camera's own app installer, which replaces this app over Wi-Fi.</li>
  * </ul>
  */
 public class DebugServer extends NanoHTTPD {
@@ -50,12 +60,27 @@ public class DebugServer extends NanoHTTPD {
     private static final long MAX_TIMEOUT_MS = 300000L;
     private static final int MAX_BODY = 256 * 1024;
     private static final int MAX_OUTPUT = 512 * 1024;
+    private static final int MAX_OTA = 64 * 1024 * 1024;
+
+    /*
+     * Over-the-air install. The camera's installer (ScalarAInstaller, the one a USB install from
+     * Sony-PMCA-RE ends in) is an exported activity without a permission. It decrypts the SPK and
+     * installs the APK. Its DecryptUtils.isSpk only accepts a path ending in ".1.spk" (anything
+     * else fails at once with DECRYPT_FINISHED ret=2), and the file must be readable by its uid:
+     * /data/local/tmp is world-writable, files created there directly are fine. The installer
+     * deletes the file afterwards.
+     */
+    private static final File OTA_FILE = new File("/data/local/tmp/webcontrol-ota.1.spk");
+    private static final ComponentName SONY_INSTALLER = new ComponentName(
+            "com.sony.scalar.dlsys.scalarainstaller",
+            "com.sony.scalar.dlsys.scalarainstaller.PackageInstallerActivity");
 
     private static final String HELP =
             "WebControl A7 debug console (BeanShell)\n"
             + "Auth: header X-Debug-Key: <key from camera-app/debug-key.txt, or the camera screen when none was built in>, or ?key=\n\n"
             + "POST /eval[?thread=worker|main][&timeout=ms][&reset=1]   body = script\n"
-            + "GET  /logcat[?lines=500]\n\n"
+            + "GET  /logcat[?lines=500]\n"
+            + "POST /ota[?md5=hex]   body = SPK (scripts/ota.sh packs the APK); installs over Wi-Fi\n\n"
             + "Bound: activity, cam (CameraEx), normal (android.hardware.Camera), hub, goal, dbg\n"
             + "dbg.main(\"code\") runs code on the main thread (camera calls); dbg.sleep(ms);\n"
             + "dbg.proxy(Iface.class, this) turns a scripted object into an interface (callbacks);\n"
@@ -129,6 +154,9 @@ public class DebugServer extends NanoHTTPD {
                 long timeout = Math.max(100L, Math.min(MAX_TIMEOUT_MS, parseLong(params.get("timeout"), DEFAULT_TIMEOUT_MS)));
                 JSONObject res = eval(script, "main".equals(params.get("thread")), timeout, "1".equals(params.get("reset")));
                 return new Response(Response.Status.OK, "application/json", res.toString());
+            }
+            if ("/ota".equals(uri) && Method.POST.equals(session.getMethod())) {
+                return ota(session, params.get("md5"));
             }
             if ("/logcat".equals(uri)) {
                 int lines = (int) Math.max(1, Math.min(20000, parseLong(params.get("lines"), 500)));
@@ -272,6 +300,86 @@ public class DebugServer extends NanoHTTPD {
         public long now() {
             return System.currentTimeMillis();
         }
+    }
+
+    // --- Over-the-air install ---
+
+    private Response ota(IHTTPSession session, String wantMd5) throws Exception {
+        long len = parseLong(session.getHeaders().get("content-length"), -1);
+        if (len <= 0 || len > MAX_OTA) {
+            return text(Response.Status.BAD_REQUEST, "Send the SPK as the body with a Content-Length up to "
+                    + MAX_OTA + " bytes\n");
+        }
+        InputStream is = session.getInputStream();
+        MessageDigest md = MessageDigest.getInstance("MD5");
+        byte[] head = new byte[4];
+        // /data is FAT: a file left from an earlier try reads back as owned by system and cannot
+        // be reopened for writing, but the world-writable folder lets us delete it.
+        OTA_FILE.delete();
+        FileOutputStream out = new FileOutputStream(OTA_FILE);
+        long done = 0;
+        try {
+            byte[] buf = new byte[65536];
+            while (done < len) {
+                int n = is.read(buf, 0, (int) Math.min(buf.length, len - done));
+                if (n < 0) {
+                    break;
+                }
+                if (done < 4) {
+                    System.arraycopy(buf, 0, head, (int) done, (int) Math.min(n, 4 - done));
+                }
+                out.write(buf, 0, n);
+                md.update(buf, 0, n);
+                done += n;
+            }
+        } finally {
+            out.close();
+        }
+        String md5 = hex(md.digest());
+        String problem = null;
+        if (done != len) {
+            problem = "Body ended after " + done + " of " + len + " bytes";
+        } else if (!"1spk".equals(new String(head, "ISO-8859-1"))) {
+            problem = "Not an SPK (no 1spk header); pack the APK with scripts/ota.sh";
+        } else if (wantMd5 != null && !wantMd5.equalsIgnoreCase(md5)) {
+            problem = "MD5 mismatch: got " + md5 + ", expected " + wantMd5;
+        }
+        if (problem != null) {
+            OTA_FILE.delete();
+            return text(Response.Status.BAD_REQUEST, problem + "\n");
+        }
+        OTA_FILE.setReadable(true, false);
+        Logger.info("OTA: received " + done + " bytes (md5 " + md5 + "), starting the installer");
+        Logger.flush();
+        // Start the installer after this response is out: it pauses this app, which stops the servers.
+        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    Intent i = new Intent(Intent.ACTION_VIEW);
+                    i.setDataAndType(Uri.fromFile(OTA_FILE), "application/vnd.android.package-archive");
+                    i.setComponent(SONY_INSTALLER);
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    m_activity.startActivity(i);
+                } catch (Throwable t) {
+                    Logger.error("OTA: could not start the installer: " + t.toString());
+                }
+            }
+        }, 800L);
+        JSONObject o = new JSONObject();
+        o.put("ok", true);
+        o.put("bytes", done);
+        o.put("md5", md5);
+        o.put("message", "Installing; the app closes now. Start it again from the application list.");
+        return new Response(Response.Status.OK, "application/json", o.toString());
+    }
+
+    private static String hex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        for (byte x : b) {
+            sb.append(Integer.toHexString((x & 0xff) | 0x100).substring(1));
+        }
+        return sb.toString();
     }
 
     // --- Logcat ---
