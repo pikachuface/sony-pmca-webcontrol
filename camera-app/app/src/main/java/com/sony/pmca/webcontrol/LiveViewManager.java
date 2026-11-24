@@ -18,10 +18,13 @@ public class LiveViewManager {
     public static final int MAX_MJPEG_CLIENTS = 3;
     private static final int LIVEVIEW_BUF_CAPACITY = 128 * 1024;
     /**
-     * Frame period by number of MJPEG clients. A frame is about 35 KB and Wi-Fi gives about
-     * 2.3 MB/s, so three clients at 20 fps already use most of it. The period is measured from
-     * the start of one fetch to the next; a fetch takes about 12 ms on the ILCE-7. (Sleeping a
-     * fixed 33/50/85 ms after each fetch gave only 8.6 fps with three clients.)
+     * Frame period by number of MJPEG clients, measured from one fetch start to the next (a
+     * fetch takes about 12 ms on the ILCE-7). One client gets the body's 23 fps without a gap
+     * over 100 ms. The camera sends at most about 1.8 MB/s in all (40-48 KB frames), so two
+     * clients got 18 fps with a few gaps of up to 117 ms and three 13 fps with about 2.5 gaps
+     * of 100-190 ms a second. Pacing by a byte budget instead (period = clients x frame size /
+     * 1.5 MB/s) was worse: two clients got 11.8 fps. For several viewers, relay one stream on
+     * the PC (host-server) instead.
      */
     private static final long[] FRAME_PERIOD_MS = {33, 33, 40, 50};
 
@@ -288,8 +291,9 @@ public class LiveViewManager {
             }
 
             long start = System.currentTimeMillis();
-            // Half the period: a /api/liveview.jpg request may have fetched a frame just now.
-            fetchPreviewFrame(intervalMs / 2);
+            // Always fetch: skipping when the previous fetch ended recently (as /api/liveview.jpg
+            // does) dropped a whole period whenever a fetch waited long for the body's frame.
+            fetchPreviewFrame(0);
 
             long sleepMs = intervalMs - (System.currentTimeMillis() - start);
             if (sleepMs > 0) {

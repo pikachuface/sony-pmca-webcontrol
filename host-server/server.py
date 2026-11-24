@@ -5,6 +5,12 @@ Provides:
   1. Static serving of web-client/dist/index.html
   2. Streaming HTTP reverse proxy for /api/* -> camera
   3. HTTPS (self-signed), so browsers allow showDirectoryPicker Auto-Save over the LAN
+  4. Live view relay: /api/liveview.mjpeg and /api/output.mjpeg are read from the camera once
+     each and shared by any number of viewers (web UI, OBS, VLC). The camera sends at most
+     about 1.8 MB/s in all; one viewer gets its 23 fps evenly, but two or three direct viewers
+     made every stream jerk.
+  5. Optional plain HTTP on localhost (--http-port), so OBS and other local players need no
+     certificate.
 """
 
 from __future__ import annotations
@@ -17,16 +23,121 @@ import shutil
 import ssl
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 
+class MjpegRelay:
+    """One camera MJPEG stream shared by any number of viewers.
+
+    The upstream connection opens with the first viewer and closes a few seconds after the
+    last one leaves, so it does not hold one of the camera's three stream slots. Each viewer
+    always gets the newest frame; a slow viewer skips frames instead of delaying the others.
+    """
+
+    IDLE_STOP_S = 5.0
+    UPSTREAM_TIMEOUT_S = 10.0
+
+    def __init__(self, camera_url: str, path: str, cid: str) -> None:
+        self.camera_url = camera_url
+        self.path = path
+        self.cid = cid
+        self.cond = threading.Condition()
+        self.frame: bytes | None = None
+        self.seq = 0
+        self.viewers = 0
+        self.running = False
+
+    def subscribe(self) -> None:
+        with self.cond:
+            self.viewers += 1
+            if not self.running:
+                self.running = True
+                threading.Thread(target=self._run, name=f"relay{self.path}", daemon=True).start()
+
+    def unsubscribe(self) -> None:
+        with self.cond:
+            self.viewers -= 1
+            self.cond.notify_all()
+
+    def wait_frame(self, last_seq: int, timeout: float) -> tuple[int, bytes | None]:
+        with self.cond:
+            self.cond.wait_for(lambda: self.seq != last_seq, timeout)
+            return self.seq, self.frame
+
+    def _idle_too_long(self, idle_since: list[float | None]) -> bool:
+        """Called with the lock held; tracks how long nobody has watched."""
+        if self.viewers > 0:
+            idle_since[0] = None
+            return False
+        if idle_since[0] is None:
+            idle_since[0] = time.monotonic()
+        return time.monotonic() - idle_since[0] > self.IDLE_STOP_S
+
+    def _run(self) -> None:
+        idle_since: list[float | None] = [None]
+        while True:
+            with self.cond:
+                if self._idle_too_long(idle_since):
+                    self.running = False
+                    self.frame = None
+                    return
+            try:
+                self._read_upstream(idle_since)
+            except Exception as exc:
+                sys.stderr.write(f"[host-server] relay {self.path}: {exc}\n")
+                time.sleep(1.0)
+
+    def _read_upstream(self, idle_since: list[float | None]) -> None:
+        cam = urllib.parse.urlparse(self.camera_url)
+        conn_cls = http.client.HTTPSConnection if cam.scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(cam.hostname or "127.0.0.1", cam.port or (443 if cam.scheme == "https" else 80),
+                        timeout=self.UPSTREAM_TIMEOUT_S)
+        try:
+            conn.request("GET", f"{self.path}?cid={urllib.parse.quote(self.cid)}")
+            resp = conn.getresponse()
+            if resp.status != 200:
+                raise RuntimeError(f"camera answered HTTP {resp.status}")
+            fp = resp.fp
+            while True:
+                # Part: --frame, headers with Content-Length, blank line, JPEG, CRLF.
+                length = -1
+                while True:
+                    line = fp.readline(1024)
+                    if not line:
+                        raise RuntimeError("camera closed the stream")
+                    line = line.strip()
+                    if not line:
+                        if length >= 0:
+                            break
+                        continue
+                    if line.lower().startswith(b"content-length:"):
+                        length = int(line.split(b":", 1)[1])
+                jpeg = fp.read(length)
+                if len(jpeg) != length:
+                    raise RuntimeError("camera closed the stream mid-frame")
+                with self.cond:
+                    self.frame = jpeg
+                    self.seq += 1
+                    self.cond.notify_all()
+                    if self._idle_too_long(idle_since):
+                        return
+        finally:
+            conn.close()
+
+
 class ServerState:
     def __init__(self, camera_url: str, web_index: Path) -> None:
         self.camera_url = camera_url.rstrip("/")
         self.web_index = web_index
+        self.relays = {
+            path: MjpegRelay(self.camera_url, path, f"host-relay-{name}")
+            for path, name in (("/api/liveview.mjpeg", "liveview"), ("/api/output.mjpeg", "output"))
+        }
 
 
 class CompanionHandler(BaseHTTPRequestHandler):
@@ -66,6 +177,11 @@ class CompanionHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        relay = self.app_state.relays.get(path)
+        if relay is not None:
+            self._serve_relay(relay)
+            return
 
         if path.startswith("/api/"):
             self._proxy_camera("GET")
@@ -109,6 +225,32 @@ class CompanionHandler(BaseHTTPRequestHandler):
 
         self._drain_request_body()
         self._send_json(404, {"error": "Not found"})
+
+    def _serve_relay(self, relay: MjpegRelay) -> None:
+        relay.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
+            self.close_connection = True
+            self.end_headers()
+            last = -1
+            while True:
+                seq, frame = relay.wait_frame(last, 5.0)
+                if frame is None or seq == last:
+                    continue
+                last = seq
+                self.wfile.write(
+                    b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                    + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n"
+                )
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLError, OSError):
+            pass
+        finally:
+            relay.unsubscribe()
 
     def _proxy_camera(self, method: str) -> None:
         cam = urllib.parse.urlparse(self.app_state.camera_url)
@@ -257,6 +399,17 @@ def main() -> None:
         help="Camera base URL (default: http://192.168.0.250:8080)",
     )
     parser.add_argument(
+        "--http-port",
+        type=int,
+        default=0,
+        help="Also serve plain HTTP on this port (e.g. 8001 for OBS); 0 = off",
+    )
+    parser.add_argument(
+        "--http-host",
+        default="127.0.0.1",
+        help="Bind host for --http-port (default: 127.0.0.1, this computer only)",
+    )
+    parser.add_argument(
         "--web-dist",
         default=str(repo_root / "web-client" / "dist" / "index.html"),
         help="Path to built web-client/dist/index.html",
@@ -284,6 +437,12 @@ def main() -> None:
     )
 
     print(f"PMCA Host Backend listening on https://{args.host}:{args.port}")
+    if args.http_port:
+        plain = ThreadingHTTPServer((args.http_host, args.http_port), CompanionHandler)
+        plain.daemon_threads = True
+        plain.app_state = state  # type: ignore[attr-defined]
+        threading.Thread(target=plain.serve_forever, name="plain-http", daemon=True).start()
+        print(f"Plain HTTP on http://{args.http_host}:{args.http_port}")
     print(f"Camera target : {state.camera_url}")
     try:
         server.serve_forever()

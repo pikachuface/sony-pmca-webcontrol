@@ -113,5 +113,7 @@ python3 host-server/server.py \
 ```
 Then open `https://localhost:8000` (or `https://<host-ip>:8000` over LAN, accepting the self-signed certificate) in your browser. HTTPS is always enabled so `showDirectoryPicker` Auto-Save works across your LAN.
 
+**Several live view viewers (web UI plus OBS, VLC, …): use the host server.** It reads `/api/liveview.mjpeg` and `/api/output.mjpeg` from the camera once each and passes the frames to any number of viewers. The camera sends at most about 1.8 MB/s in all: one viewer gets its 23 fps evenly, but with two or three viewers connected straight to the camera every stream jerks. For OBS add `--http-port 8001` (plain HTTP on this computer only, so no certificate warning) and add a **Media Source**: uncheck Local File, Input `http://127.0.0.1:8001/api/output.mjpeg`, FFmpeg Options `use_wallclock_as_timestamps=1` (MJPEG carries no timestamps; FFmpeg assumes 25 fps and jerks about once a second), Network Buffering 0 MB.
+
 ### Option C: Built-in In-Camera UI
 Opening `http://<camera-ip>:8080` directly in any modern browser on your LAN serves the pre-compressed, camera-embedded React UI (`assets/index.html.gzip`, served with `Content-Encoding: gzip`), providing LiveView, Focus Peaking, Exposure/WB/Zoom, the Focus knob, Save/Auto-Save (via browser downloads), Photos, Events, and RPC Inspector without running a separate host server.

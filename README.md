@@ -92,7 +92,8 @@ Then set your Wi-Fi under **Network → Access Point Set.** on the camera, start
 * `camera-app/`: Android 2.3 (API 10) in-camera APK built on `OpenMemories-Framework` and `NanoHTTPD`
 * `web-client/`: React + TypeScript + Vite web UI and the `CameraClient` SDK (`src/api/cameraClient.ts`)
 * `host-server/`: optional Python 3 HTTPS server that serves the web UI and proxies `/api/*` to the
-  camera, so browsers allow saving straight into a local folder
+  camera, so browsers allow saving straight into a local folder, and shares one live view stream
+  among several viewers (web UI, OBS), which the camera cannot feed smoothly on its own
 * `docker/`, `scripts/build.sh`: pinned build environment
 
 ## License
