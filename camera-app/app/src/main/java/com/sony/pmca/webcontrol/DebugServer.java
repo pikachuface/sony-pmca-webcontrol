@@ -29,8 +29,9 @@ import fi.iki.elonen.NanoHTTPD;
  * so camera behaviour can be explored without rebuilding the APK.
  *
  * Every request except GET / needs the key shown on the camera screen, as header
- * {@code X-Debug-Key} or parameter {@code key}. The key is random, generated once and kept in
- * the app's private preferences. Anyone with the key can run arbitrary code as this app.
+ * {@code X-Debug-Key} or parameter {@code key}. The key comes from camera-app/debug-key.txt at
+ * build time (gitignored); without it, a random key is generated once and kept in the app's
+ * private preferences. Anyone with the key can run arbitrary code as this app.
  *
  * Endpoints:
  * <ul>
@@ -79,6 +80,9 @@ public class DebugServer extends NanoHTTPD {
     }
 
     private static String loadKey(Context ctx) {
+        if (BuildConfig.DEBUG_KEY != null && BuildConfig.DEBUG_KEY.length() >= 8) {
+            return BuildConfig.DEBUG_KEY;
+        }
         SharedPreferences p = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         String k = p.getString(KEY_PREF, null);
         if (k == null || k.length() < 8) {

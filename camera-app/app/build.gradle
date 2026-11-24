@@ -10,6 +10,11 @@ android {
         targetSdkVersion 10
         versionCode 1
         versionName "1.0.0"
+        // Fixed debug console key from camera-app/debug-key.txt (gitignored); without the
+        // file the app makes a random key and shows it on the camera screen.
+        def debugKeyFile = rootProject.file('debug-key.txt')
+        def debugKey = debugKeyFile.exists() ? debugKeyFile.text.trim() : ''
+        buildConfigField "String", "DEBUG_KEY", "\"${debugKey}\""
     }
 
     // One committed debug key for every build machine and CI run. A camera keeps the

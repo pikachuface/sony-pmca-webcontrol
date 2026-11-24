@@ -203,7 +203,7 @@ Long-polling endpoint backed by a 256-entry ring buffer. Blocks until at least o
 
 ## Debug Console (port 8081)
 
-`DebugServer` runs [BeanShell](https://github.com/beanshell/beanshell) 2.0b6 scripts (Java syntax, loosely typed) inside the app, so camera behaviour can be explored without rebuilding the APK. Every request except `GET /` needs the key shown on the camera screen (second line of the Wi-Fi status), as header `X-Debug-Key` or parameter `key`. The key is random, created once and stored in the app's private preferences. **Anyone with the key can run arbitrary code as the app**; keep the camera on a trusted network.
+`DebugServer` runs [BeanShell](https://github.com/beanshell/beanshell) 2.0b6 scripts (Java syntax, loosely typed) inside the app, so camera behaviour can be explored without rebuilding the APK. Every request except `GET /` needs the key shown on the camera screen (second line of the Wi-Fi status), as header `X-Debug-Key` or parameter `key`. The key is read at build time from `camera-app/debug-key.txt` (gitignored, never commit it); without that file the app creates a random key once and keeps it in its private preferences. **Anyone with the key can run arbitrary code as the app**; keep the camera on a trusted network.
 
 * **`POST /eval[?thread=worker|main][&timeout=ms][&reset=1]`**, body = script. Runs on a worker thread by default (timeout 10 s, max 300 s); `thread=main` runs the whole script on the main thread. Variables persist between calls until `reset=1`. Returns `{ ok, ms, result, resultClass, output, error }`; `print(x)` writes to `output`.
 * **`GET /logcat[?lines=500]`**: The last lines of `logcat -d -v time` (`READ_LOGS` permission).

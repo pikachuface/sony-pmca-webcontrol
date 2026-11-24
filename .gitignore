@@ -18,3 +18,6 @@ node_modules/
 dist/
 camera-app/app/src/main/assets/index.html
 camera-app/app/src/main/assets/index.html.gzip
+
+# Local debug console key, built into the APK (never commit)
+camera-app/debug-key.txt
