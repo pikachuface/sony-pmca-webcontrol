@@ -7,12 +7,15 @@ import android.content.IntentFilter;
 import android.graphics.Color;
 import android.hardware.Camera;
 import android.net.NetworkInfo;
+import android.net.wifi.SupplicantState;
+import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
 import android.os.BatteryManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.text.format.Formatter;
 import android.util.Pair;
 import android.view.SurfaceHolder;
@@ -59,6 +62,38 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
     /** Keeps Wi-Fi up while the app runs; without it Android may put Wi-Fi to sleep and drop clients. */
     private WifiManager.WifiLock m_wifiLock;
     private String m_lastWifiLog;
+
+    /*
+     * Wi-Fi watchdog. On the ILCE-7 the DHCP renewal at half the lease times out, Android then
+     * drops the connection and wpa_supplicant stays disconnected (it keeps scanning but never
+     * associates again) until Wi-Fi is restarted. Seen in logcat: "DHCP renewal failed: Timed
+     * out waiting for DHCP Renew to finish", then CTRL-EVENT-DISCONNECTED reason=3
+     * locally_generated=1, 15 minutes after connecting with a 1800 s lease. A fresh DHCP request
+     * after reconnecting works, so the watchdog first asks the supplicant to reconnect, then
+     * restarts Wi-Fi, and repeats while the connection stays down.
+     */
+    private static final long WIFI_CHECK_MS = 5000L;
+    private static final long WIFI_RECONNECT_AFTER_MS = 20000L;
+    private static final long WIFI_RESTART_AFTER_MS = 50000L;
+    private static final long WIFI_RETRY_AFTER_MS = 110000L;
+    private long m_wifiDownSince;
+    private final Runnable m_wifiEnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                m_wifiManager.setWifiEnabled(true);
+            } catch (Throwable ignored) {
+            }
+        }
+    };
+    private int m_wifiRecoveryStep;
+    private final Runnable m_wifiWatchdog = new Runnable() {
+        @Override
+        public void run() {
+            checkWifi();
+            m_handler.postDelayed(this, WIFI_CHECK_MS);
+        }
+    };
     private BroadcastReceiver m_networkStateReceiver;
     private BroadcastReceiver m_batteryReceiver;
     private MacroHttpServer m_httpServer;
@@ -189,6 +224,10 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
 
         startHttpServerWithFallback();
         startDebugServer();
+        m_wifiDownSince = 0;
+        m_wifiRecoveryStep = 0;
+        m_handler.removeCallbacks(m_wifiWatchdog);
+        m_handler.postDelayed(m_wifiWatchdog, WIFI_CHECK_MS);
 
         try {
             m_camera = CameraEx.open(0, null);
@@ -618,6 +657,8 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             unregisterReceiver(m_batteryReceiver);
         } catch (Throwable ignored) {
         }
+        m_handler.removeCallbacks(m_wifiWatchdog);
+        m_handler.removeCallbacks(m_wifiEnable);
         try {
             if (m_wifiLock != null && m_wifiLock.isHeld()) {
                 m_wifiLock.release();
@@ -758,6 +799,70 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /** Runs every WIFI_CHECK_MS on the main thread while the app is in front; see m_wifiWatchdog. */
+    private void checkWifi() {
+        try {
+            WifiInfo info = m_wifiManager.getConnectionInfo();
+            boolean up = info != null && info.getIpAddress() != 0
+                    && info.getSupplicantState() == SupplicantState.COMPLETED;
+            long now = SystemClock.elapsedRealtime();
+            if (up) {
+                if (m_wifiRecoveryStep > 0) {
+                    Logger.info("Wi-Fi watchdog: back after " + (now - m_wifiDownSince) + " ms (step "
+                            + m_wifiRecoveryStep + ")");
+                    Logger.flush();
+                }
+                m_wifiDownSince = 0;
+                m_wifiRecoveryStep = 0;
+                return;
+            }
+            if (m_wifiDownSince == 0) {
+                m_wifiDownSince = now;
+                return;
+            }
+            long down = now - m_wifiDownSince;
+            String state = info != null ? String.valueOf(info.getSupplicantState()) : "?";
+            if (m_wifiRecoveryStep == 0 && down >= WIFI_RECONNECT_AFTER_MS) {
+                m_wifiRecoveryStep = 1;
+                int enabled = enableDisabledNetworks();
+                boolean ok = m_wifiManager.reconnect();
+                Logger.info("Wi-Fi watchdog: down " + down + " ms (" + state + "), re-enabled " + enabled
+                        + " network(s), reconnect=" + ok);
+                Logger.flush();
+            } else if (m_wifiRecoveryStep == 1 && down >= WIFI_RESTART_AFTER_MS) {
+                m_wifiRecoveryStep = 2;
+                Logger.info("Wi-Fi watchdog: down " + down + " ms (" + state + "), restarting Wi-Fi");
+                Logger.flush();
+                m_wifiManager.setWifiEnabled(false);
+                m_handler.postDelayed(m_wifiEnable, 3000L);
+            } else if (m_wifiRecoveryStep == 2 && down >= WIFI_RETRY_AFTER_MS) {
+                // Still down (access point gone?): start over with a reconnect.
+                m_wifiDownSince = now - WIFI_RECONNECT_AFTER_MS;
+                m_wifiRecoveryStep = 0;
+            }
+        } catch (Throwable t) {
+            Logger.error("Wi-Fi watchdog: " + t.toString());
+        }
+    }
+
+    /** Re-enables saved networks that the supplicant disabled; returns how many. */
+    private int enableDisabledNetworks() {
+        int n = 0;
+        try {
+            java.util.List<WifiConfiguration> nets = m_wifiManager.getConfiguredNetworks();
+            if (nets != null) {
+                for (WifiConfiguration c : nets) {
+                    if (c.status == WifiConfiguration.Status.DISABLED) {
+                        m_wifiManager.enableNetwork(c.networkId, false);
+                        n++;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return n;
     }
 
     private void updateWifiStatus() {
