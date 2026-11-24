@@ -251,39 +251,28 @@ public final class AfModeController {
     }
 
     /**
-     * A click on the live view while AF-C runs: moves the spot there in Spot mode, otherwise
-     * restarts AF-C over the Wide or Center area.
+     * A click on the live view while AF-C runs: AF-C goes on in a spot at the click. In the Wide
+     * or Center area the area switches to Spot, since a click means "focus here".
      */
     public JSONObject continuousClick(double nx, double ny) throws Exception {
         JSONObject want = new JSONObject();
-        boolean spot;
-        synchronized (this) {
-            spot = AREA_SPOT.equals(m_area);
-        }
-        if (spot) {
-            want.put("x", nx);
-            want.put("y", ny);
-        } else {
-            want.put("refocus", true);
-        }
+        want.put("x", nx);
+        want.put("y", ny);
         return setAfMode(want);
     }
 
     /**
-     * Single AF setup on the main thread: focus-mode auto, AF-S and the current area; in Spot
-     * mode the spot moves to (nx, ny) first. Returns the focus point written, in -1000..1000.
+     * Single AF setup on the main thread: focus-mode auto, AF-S and a spot at (nx, ny); the
+     * Wide and Center areas switch to Spot, since a click means "focus here". Returns the focus
+     * point written, in -1000..1000.
      */
     int[] configureSingleAf(CameraEx cam, double nx, double ny) {
-        String area;
+        String area = AREA_SPOT;
         String size;
-        double x;
-        double y;
+        double x = clamp01(nx);
+        double y = clamp01(ny);
         synchronized (this) {
-            area = m_area;
             size = m_spotSize;
-            boolean spot = AREA_SPOT.equals(area);
-            x = spot ? clamp01(nx) : m_spotX;
-            y = spot ? clamp01(ny) : m_spotY;
         }
         Camera.Parameters p = cam.createEmptyParameters();
         CameraEx.ParametersModifier m = cam.createParametersModifier(p);

@@ -19,7 +19,7 @@ const AREA_LABELS: Record<FocusArea, string> = { wide: 'Wide', center: 'Center',
 const AREA_HINTS: Record<FocusArea, string> = {
   wide: 'Wide: the camera picks the subject over most of the frame',
   center: 'Center: focuses on the middle of the frame',
-  spot: 'Spot: a movable focus window; click the live view to place it',
+  spot: 'Spot: a movable focus window; a click on the live view places it there',
 };
 const SIZE_LABELS: Record<SpotSize, string> = { small: 'S', medium: 'M', large: 'L' };
 
@@ -343,15 +343,13 @@ export function FocusControl({ client, connected, focusShift, afMode, afStatus, 
         <p className="focus-lock-hint">
           The camera keeps refocusing{area === 'spot' ? ' in the spot' : area === 'center' ? ' in the centre' : ' over the Wide area'}
           {faces ? ', faces first' : ''}.{' '}
-          {area === 'spot' ? 'Click the live view to move the spot.' : 'Click the live view to refocus.'}
+          Click the live view to focus there{area === 'spot' ? '' : ' (switches to Spot)'}.
         </p>
       )}
       {connected && !continuous && !ready && (
         <p className="focus-lock-hint">
-          {area === 'spot'
-            ? 'Click the live view to place the spot and autofocus.'
-            : `Click the live view to autofocus over the ${area === 'center' ? 'Center' : 'Wide'} area.`}{' '}
-          The knob then fine-tunes focus around that point.
+          Click the live view to autofocus there{area === 'spot' ? '' : ' (switches to Spot)'}. The knob then
+          fine-tunes focus around that point.
         </p>
       )}
 

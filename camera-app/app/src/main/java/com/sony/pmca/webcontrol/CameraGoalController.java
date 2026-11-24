@@ -556,7 +556,7 @@ public class CameraGoalController {
         final double clampedY = Math.max(0.0, Math.min(1.0, ny));
         final AfModeController afMode = m_activity.getAfMode();
         if (afMode.isContinuous()) {
-            // Continuous AF: move its spot here (Spot area) or refocus, instead of a single AF.
+            // Continuous AF: go on in a spot here (switching Wide or Center to Spot), no single AF.
             JSONObject res = afMode.continuousClick(clampedX, clampedY);
             res.put("superseded", false);
             res.put("timedOut", false);

@@ -1,11 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AfModeState, CameraClient, FaceBox } from '../api/cameraClient';
+import type { AfModeState, CameraClient, FaceBox, SpotSize } from '../api/cameraClient';
 import { CropOverlay } from './CropOverlay';
 import { clamp, containBox, rectDisplayToImage, rectImageToDisplay, type NRect } from './viewGeometry';
 
 const MAX_PREVIEW_ZOOM = 4;
 /** Pointer travel (px) after which a press on the zoomed view pans instead of autofocusing. */
 const PAN_THRESHOLD_PX = 4;
+/** Spot window per size as a fraction of the frame, as the ILCE-7 reports it (AfModeState.window). */
+const SPOT_WINDOW: Record<SpotSize, { w: number; h: number }> = {
+  small: { w: 0.058, h: 0.078 },
+  medium: { w: 0.105, h: 0.125 },
+  large: { w: 0.152, h: 0.171 },
+};
 
 interface LiveViewPanelProps {
   client: CameraClient;
@@ -418,7 +424,7 @@ export function LiveViewPanel({
 
     clearAfTimer();
     setAfStatus('focusing');
-    if (afMode?.area === 'spot') setSpotDraft({ x: normX, y: normY });
+    if (afMode) setSpotDraft({ x: normX, y: normY });
     try {
       const res = await client.autoFocusAt(normX, normY);
       if (!res.superseded) {
@@ -504,18 +510,20 @@ export function LiveViewPanel({
     height: viewScale * gridBase.height,
   };
 
-  // Focus window in stage pixels: the camera's area, coloured by the AF result. A clicked spot
-  // moves at once; the camera's window replaces it with its next AfMode update.
+  // Focus window in stage pixels: the camera's area, coloured by the AF result. A click focuses
+  // in a spot there (Wide and Center switch to Spot); the spot shows at once and the camera's
+  // window replaces it with its next AfMode update.
   const camWindow = afMode?.window;
-  const fw =
-    spotDraft && camWindow && afMode?.area === 'spot'
-      ? {
-          x: Math.min(Math.max(spotDraft.x - camWindow.w / 2, 0), 1 - camWindow.w),
-          y: Math.min(Math.max(spotDraft.y - camWindow.h / 2, 0), 1 - camWindow.h),
-          w: camWindow.w,
-          h: camWindow.h,
-        }
-      : camWindow;
+  const draftSize =
+    afMode?.area === 'spot' && camWindow ? { w: camWindow.w, h: camWindow.h } : SPOT_WINDOW[afMode?.spotSize ?? 'large'];
+  const fw = spotDraft
+    ? {
+        x: Math.min(Math.max(spotDraft.x - draftSize.w / 2, 0), 1 - draftSize.w),
+        y: Math.min(Math.max(spotDraft.y - draftSize.h / 2, 0), 1 - draftSize.h),
+        w: draftSize.w,
+        h: draftSize.h,
+      }
+    : camWindow;
   const focusRect =
     fw && fw.w > 0 && fw.h > 0
       ? (() => {
@@ -839,7 +847,7 @@ export function LiveViewPanel({
         )}
         {connected && streaming && !frameError && focusRect && (
           <div
-            className={`focus-window is-${focusState} ${afMode?.area === 'wide' ? 'is-wide' : ''}`}
+            className={`focus-window is-${focusState} ${!spotDraft && afMode?.area === 'wide' ? 'is-wide' : ''}`}
             style={focusRect}
             aria-hidden="true"
           >
