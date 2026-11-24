@@ -54,6 +54,8 @@ export function LiveViewPanel({
   const [peaking, setPeaking] = useState(false);
   const [showHistogram, setShowHistogram] = useState(false);
   const [afStatus, setAfStatus] = useState<'idle' | 'focusing' | 'ok' | 'fail' | 'afc'>('idle');
+  // Clicked spot centre (image coordinates), drawn at once until the camera reports the moved spot.
+  const [spotDraft, setSpotDraft] = useState<{ x: number; y: number } | null>(null);
   const [rotationDeg, setRotationDeg] = useState<0 | 90 | 180 | 270>(() => {
     try {
       const saved = Number(localStorage.getItem('pmca_lv_rotation'));
@@ -107,6 +109,11 @@ export function LiveViewPanel({
       }
     };
   }, []);
+
+  // The camera's AfMode update carries the moved spot.
+  useEffect(() => {
+    setSpotDraft(null);
+  }, [afMode]);
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   useEffect(() => {
@@ -411,6 +418,7 @@ export function LiveViewPanel({
 
     clearAfTimer();
     setAfStatus('focusing');
+    if (afMode?.area === 'spot') setSpotDraft({ x: normX, y: normY });
     try {
       const res = await client.autoFocusAt(normX, normY);
       if (!res.superseded) {
@@ -418,6 +426,7 @@ export function LiveViewPanel({
         scheduleAfDismiss(2000);
       }
     } catch (err) {
+      setSpotDraft(null);
       setAfStatus('fail');
       scheduleAfDismiss(2000);
       onError?.(err instanceof Error ? err.message : String(err));
@@ -495,8 +504,18 @@ export function LiveViewPanel({
     height: viewScale * gridBase.height,
   };
 
-  // Focus window in stage pixels: the camera's area, coloured by the AF result.
-  const fw = afMode?.window;
+  // Focus window in stage pixels: the camera's area, coloured by the AF result. A clicked spot
+  // moves at once; the camera's window replaces it with its next AfMode update.
+  const camWindow = afMode?.window;
+  const fw =
+    spotDraft && camWindow && afMode?.area === 'spot'
+      ? {
+          x: Math.min(Math.max(spotDraft.x - camWindow.w / 2, 0), 1 - camWindow.w),
+          y: Math.min(Math.max(spotDraft.y - camWindow.h / 2, 0), 1 - camWindow.h),
+          w: camWindow.w,
+          h: camWindow.h,
+        }
+      : camWindow;
   const focusRect =
     fw && fw.w > 0 && fw.h > 0
       ? (() => {

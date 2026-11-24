@@ -71,9 +71,15 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
      * locally_generated=1, 15 minutes after connecting with a 1800 s lease. A fresh DHCP request
      * after reconnecting works, so the watchdog first asks the supplicant to reconnect, then
      * restarts Wi-Fi, and repeats while the connection stays down.
+     *
+     * Each failed renewal costs an outage. Measured 2026-11-24 with a 20 s reconnect delay and a
+     * 5 s check: 28 s without network every 14.5 minutes (the reconnect itself takes 0.3 s, the
+     * DHCP request 6 s). The network state broadcast now runs the check at once and the check
+     * repeats every second while Wi-Fi is down, so the reconnect follows 2 s after the drop.
      */
     private static final long WIFI_CHECK_MS = 5000L;
-    private static final long WIFI_RECONNECT_AFTER_MS = 20000L;
+    private static final long WIFI_CHECK_DOWN_MS = 1000L;
+    private static final long WIFI_RECONNECT_AFTER_MS = 2000L;
     private static final long WIFI_RESTART_AFTER_MS = 50000L;
     private static final long WIFI_RETRY_AFTER_MS = 110000L;
     private long m_wifiDownSince;
@@ -91,7 +97,7 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         @Override
         public void run() {
             checkWifi();
-            m_handler.postDelayed(this, WIFI_CHECK_MS);
+            m_handler.postDelayed(this, m_wifiDownSince != 0 ? WIFI_CHECK_DOWN_MS : WIFI_CHECK_MS);
         }
     };
     private BroadcastReceiver m_networkStateReceiver;
@@ -210,6 +216,9 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
             public void onReceive(Context context, Intent intent) {
                 logWifiChange(intent);
                 updateWifiStatus();
+                // React to a drop now instead of at the next periodic check.
+                m_handler.removeCallbacks(m_wifiWatchdog);
+                m_handler.post(m_wifiWatchdog);
             }
         };
         m_batteryReceiver = new BroadcastReceiver() {
@@ -820,7 +829,10 @@ public class MacroServerActivity extends BaseActivity implements SurfaceHolder.C
         }
     }
 
-    /** Runs every WIFI_CHECK_MS on the main thread while the app is in front; see m_wifiWatchdog. */
+    /**
+     * Runs on the main thread while the app is in front: every WIFI_CHECK_MS, every
+     * WIFI_CHECK_DOWN_MS while Wi-Fi is down, and on each network state change; see m_wifiWatchdog.
+     */
     private void checkWifi() {
         try {
             WifiInfo info = m_wifiManager.getConnectionInfo();

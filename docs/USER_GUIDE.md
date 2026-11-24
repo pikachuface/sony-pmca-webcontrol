@@ -74,6 +74,8 @@ If you don't want to set up Python dependencies or USB drivers manually, use **[
 2. On the camera: **Menu → Application → Application List → WebControl A7** (upstream's app is listed as *PMCA WebControl*).
 3. Wait for the camera to join your Wi-Fi router. The LAN IP address and port (for example, `http://192.168.0.250:8080`) appear at the bottom of the camera screen. Press **UP** or **OK** on the camera to toggle the on-screen HUD overlay.
 
+> **Wi-Fi drops every few minutes or hours (ILCE-7):** the camera cannot renew its DHCP lease. At half the lease time the renewal times out, Android drops Wi-Fi, and the app reconnects it. The live view and OBS freeze until Wi-Fi is back: 28 s measured when the app waited 20 s; it now reconnects 2 s after the drop, and the new DHCP request takes about 6 s. With the usual 30-minute lease this happens every 15 minutes. Give the camera a long lease on your router (a DHCP reservation with 12 h or more) and it happens only once per half lease.
+
 ---
 
 ## 4. Using the Web Control UI
